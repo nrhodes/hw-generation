@@ -6,6 +6,8 @@ import io
 import matplotlib.pyplot as pyplot
 from pathlib import Path
 from PIL import Image
+from pytorch_lightning.callbacks import Callback
+
 from torchvision import transforms
 
 
@@ -16,8 +18,7 @@ args = {
     # for model
     'batch_size': 512,
     'test_batch_size': 128,
-    'epochs':20,
-    'max_seq_length': 50,
+    'epochs':1,
     'truncated_bptt_steps': 5,
     'lr': .001,
     'max_lr': .01,
@@ -29,7 +30,7 @@ args = {
     # for generation
     'temperature': 0.9,
     "prompt": "A",
-    "generated_length": 50,
+    "generated_length": 30,
 
     # meta
     'seed': 1,
@@ -52,7 +53,6 @@ import pytorch_lightning as pl
 
 torch.manual_seed(args["seed"])
 use_cuda = torch.cuda.is_available()
-print("cuda is available", use_cuda)
 device = torch.device("cuda")
 
 
@@ -66,10 +66,50 @@ import torch.optim as optim
 from torch.utils.data import Dataset
 from torch.utils.data import Sampler
 
+def plot_stroke(stroke, save_name=None):
+    # Plot a single example.
+    #print(f'stroke before penup: {stroke}')
+    f, ax = pyplot.subplots()
+
+    stroke[-1,0] = 1   #penup so we can see the last part of the stroke
+    #print(f'stroke after penup: {stroke}')
+
+    x = np.cumsum(stroke[:, 1])
+    y = np.cumsum(stroke[:, 2])
+
+    size_x = x.max() - x.min() + 1.
+    size_y = y.max() - y.min() + 1.
+
+    f.set_size_inches(5. * size_x / size_y, 5.)
+
+    cuts = np.where(stroke[:, 0] == 1)[0]
+    #print(f'np.where(stroke[:, 0] == 1): {np.where(stroke[:, 0] == 1)}')
+    #print(f'plot_stroke: cuts={cuts}')
+    start = 0
+
+    for cut_value in cuts:
+        ax.plot(x[start:cut_value], y[start:cut_value],
+                'k-', linewidth=3)
+        start = cut_value + 1
+    ax.axis('equal')
+    ax.axes.get_xaxis().set_visible(False)
+    ax.axes.get_yaxis().set_visible(False)
+
+    if save_name is None:
+        pyplot.show()
+    else:
+      try:
+        pyplot.savefig(
+            save_name,
+            bbox_inches='tight',
+            pad_inches=0.5)
+      except Exception:
+        print("Error building image!: " + save_name)
+
+    return f
+
 
 import string
-
-# TODO: make these not be globals
 
 class HWModel(pl.LightningModule):
   def __init__(self, lr=.01):
@@ -77,6 +117,8 @@ class HWModel(pl.LightningModule):
     self.hidden_size = args["rnn_hidden_size"]
     self.lstm = nn.LSTM(input_size=3, hidden_size=self.hidden_size, batch_first=True)
     self.fc = nn.Linear(self.hidden_size, 3) 
+    # This is passing back the hiddens but not breaking apart the sequence
+    # (e.g., not calling tbptt_split_batch)
     self.truncated_bptt_steps = args['truncated_bptt_steps']
     self.learning_rate = lr
     self.bceWithLogitsLoss = torch.nn.BCEWithLogitsLoss()
@@ -115,10 +157,15 @@ class HWModel(pl.LightningModule):
     return correct, total
 
   def loss(self, y_hat, y):
-      return (F.mse_loss(y_hat[1:], y[1:]) +
-        self.bceWithLogitsLoss(y_hat[:1], y[:1]))
+     # print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
+      #print(f'y_hat: [{y_hat[:,:20:]}, {y[:,:20,:]}')
+      mse_loss = F.mse_loss(y_hat[:,:,1:], y[:,:,1:]) 
+      bce_loss = self.bceWithLogitsLoss(y_hat[:,:,:1], y[:,:,:1])
+      print(f'mse_loss: {mse_loss}, bce_loss = {bce_loss}')
+      return mse_loss + bce_loss
 
   def training_step(self, batch, batch_idx, hiddens):
+    #print(f'training_step(batch={batch}, batch_idx={batch_idx}')
     data, y = batch
     #print(f"data.shape {data.shape}")
     y_hat, hiddens = self(data, hiddens)
@@ -126,66 +173,19 @@ class HWModel(pl.LightningModule):
     #correct, total = self.char_accuracy(y_hat, y)
 
     loss = self.loss(y_hat, y)
-    self.log('train_loss', loss, prog_bar=True)
+    if batch_idx == 0:
+        #print(f'epoch: {self.current_epoch} batch: {batch_idx} training loss({y_hat}, {y})')
+        self.log('train_loss', loss, prog_bar=True)
+        #if self.current_epoch == 0:
+            #print(f"saving original training image shape: {y[0].shape}")
+            #f = plot_stroke(y[0].cpu().numpy())
+            #self.logger.experiment.add_figure('original training image', f, self.current_epoch)
     #self.log('train_accuracy', 100.*correct/total)
 
     return {"loss": loss, "hiddens": hiddens}
 
   def validation_step(self, batch, batch_idx):
-    print('validation_step: begin')
-    def plot_to_image(figure):
-      """Converts the matplotlib plot specified by 'figure' to a PNG image and
-      returns it. The supplied figure is closed and inaccessible after this call."""
-      # Save the plot to a PNG in memory.
-      buf = io.BytesIO()
-      pyplot.savefig(buf, format='png')
-      # Closing the figure prevents it from being displayed directly inside
-      # the notebook.
-      pyplot.close(figure)
-      buf.seek(0)
-      # Convert PNG buffer to TF image
-      image = Image.open(buf)
-      #print(f'image={image}')
-      # Add the batch dimension
-      return transforms.ToTensor()(image)
-
-    def plot_stroke(stroke, save_name=None):
-      # Plot a single example.
-      f, ax = pyplot.subplots()
-
-      x = np.cumsum(stroke[:, 1])
-      y = np.cumsum(stroke[:, 2])
-  
-      size_x = x.max() - x.min() + 1.
-      size_y = y.max() - y.min() + 1.
-
-      f.set_size_inches(5. * size_x / size_y, 5.)
-
-      cuts = np.where(stroke[:, 0] == 1)[0]
-      start = 0
-
-      for cut_value in cuts:
-          ax.plot(x[start:cut_value], y[start:cut_value],
-                  'k-', linewidth=3)
-          start = cut_value + 1
-      ax.axis('equal')
-      ax.axes.get_xaxis().set_visible(False)
-      ax.axes.get_yaxis().set_visible(False)
-
-      if save_name is None:
-          pyplot.show()
-      else:
-        try:
-          pyplot.savefig(
-              save_name,
-              bbox_inches='tight',
-              pad_inches=0.5)
-        except Exception:
-          print("Error building image!: " + save_name)
-
-      return f
-
-    print(f'validation_step')
+    #print(f'validation_step')
     data, y = batch
     hidden = self.getNewHidden(batch_size=data.shape[0])
     y_hat, hidden = model(data, hidden)
@@ -197,10 +197,8 @@ class HWModel(pl.LightningModule):
       sample = self.generateUnconditionally()
       #print(f'sample: {sample}')
       f = plot_stroke(sample)
-      t = plot_to_image(f)
-      print(f'image_tensor.shape: {t.shape}')
-
-      self.logger.experiment.add_image('sample', t, self.current_epoch)
+      self.logger.experiment.add_figure('sample as figure', f, self.current_epoch)
+      #self.logger.experiment.add_text('sample as tensor', str(sample.tolist()), self.current_epoch)
 
 
   def generateUnconditionally(self, output_length=args["generated_length"]):
@@ -208,7 +206,6 @@ class HWModel(pl.LightningModule):
     result = ""
     hidden = self.getNewHidden(batch_size=1)
     output = torch.zeros((output_length+1, 3), device=self.device)
-    print(f'generate: output.shape: {output.shape}')
 
     for step, idx in enumerate(range(output_length)):
       with torch.no_grad():
@@ -218,13 +215,12 @@ class HWModel(pl.LightningModule):
       output[idx, :] = predictions[0, -1, :]
       output[idx,0] = 1 if predictions[0, -1, 0] > 0 else 0
 
-    output[-1,0] = 1  # final penup
     # skip first element
     asNumpy = output[1:,:].cpu().numpy()
     return asNumpy
 
   def configure_optimizers(self):
-    print('self.learning_rate', self.learning_rate)
+   # print('self.learning_rate', self.learning_rate)
     optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
     #scheduler = torch.optim.lr_scheduler.OneCycleLR(
         #optimizer,
@@ -237,22 +233,21 @@ from torch.utils.data import random_split
 from torch.utils.data import DataLoader
 import numpy as np
 
-# Break up given data into chunks of max_seq_length each.
-# TODO(neil): make this random sequences rather than fixed
+# TODO(neil): make this random sequences rather than fixed?
+MAX_SEQ=200
 class SeqDataset(Dataset):
-  def __init__(self, data, seq_length=args['max_seq_length']):
+  def __init__(self, data):
       """data is a numpy array containing different seq*3 arrays"""
-      #self.seq_length = seq_length
-      #self.num_sequences = (len(data) - self.seq_length) // self.seq_length
-      self.data = data
+      #print(f'SeqDataSet.__init__: data.shape: {data.shape}')
+      self.data = data[:1][:MAX_SEQ+1]
 
   def __len__(self):
-    return 2
-    #return (len(self.data) - self.seq_length) // self.seq_length
+    #print(f'SeqDataSet len(self.data)={len(self.data)} self.seq_length={self.seq_length}')
+    return len(self.data)
 
   def __getitem__(self, idx):
     t = torch.as_tensor(self.data[idx])
-    #print(t)
+    #print(f'SeqDataset.getitem({idx}): returning shape:{t.shape}')
     return t[:-1], t[1:]
 
 class HWDataModule(pl.LightningDataModule): 
@@ -265,19 +260,23 @@ class HWDataModule(pl.LightningDataModule):
         datadir = hwdir / 'data'
         strokes = np.load(datadir / 'strokes-py3.npy', allow_pickle=True)
         import string
-        self.dataset = SeqDataset(strokes)
+        self.dataset1 = SeqDataset(strokes[0:1])
+        self.dataset2 = SeqDataset(strokes[1:2])
 
     def train_dataloader(self):
-        return DataLoader(self.train_ds, batch_size=self.bs)
+        return DataLoader(self.train_ds, shuffle=False, batch_size=self.bs, num_workers=24)
 
     def val_dataloader(self):
-        return DataLoader(self.val_ds, batch_size=self.bs)
+        return DataLoader(self.val_ds, shuffle=False, batch_size=self.bs, num_workers=24)
 
 
     def setup(self, stage = None):
-        train_split = int(len(self.dataset)*0.5)
-        valid_split = len(self.dataset) - train_split
-        self.train_ds, self.val_ds = random_split(self.dataset, [train_split, valid_split])
+        #train_split = int(len(self.dataset)*0.5)
+        #valid_split = len(self.dataset) - train_split
+        #self.train_ds, self.val_ds = random_split(self.dataset, [train_split, valid_split])
+        self.train_ds = self.dataset1   
+        self.val_ds = self.dataset2   
+        #print(f'HWDataModule: len(train_ds) = {len(self.train_ds)}, len(val_ds)={len(self.val_ds)}')
 
 
 
@@ -291,11 +290,23 @@ logger = TensorBoardLogger(save_dir="/data/neil/runs", name="hw_generation-light
 lr_monitor = LearningRateMonitor(logging_interval='step')
 
 data_module = HWDataModule()
-trainer = pl.Trainer(progress_bar_refresh_rate=1,
+class MyPrintingCallback(Callback):
+    def on_train_start(self, trainer, pl_module):
+        print("Training is starting")
+        dl = data_module.train_dataloader()
+        print(f"dl={dl}")
+        f = plot_stroke(dl.dataset[0][0].numpy())
+        logger.experiment.add_figure('original training image', f, 0)
+
+
+
+trainer = pl.Trainer(
         max_epochs=args["epochs"],
-        gpus=1,
+        accelerator='gpu',
+        devices=1,
         logger=logger,
-        callbacks=[lr_monitor],
+        log_every_n_steps=1,
+        callbacks=[MyPrintingCallback()],
         )
 
 logger.log_hyperparams(args)
