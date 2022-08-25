@@ -16,26 +16,21 @@ hwdir = Path('/data') / 'neil' / 'hw'
 
 args = {
     # for model
-    'batch_size': 512,
+    'batch_size': 1,
     'test_batch_size': 128,
-    'epochs':30,
+    'training_set_size': 1,
+    'validation_set_size': 1,
+    'epochs':200,
     'truncated_bptt_steps': 500,
-    'lr': .001,
+    'lr': .005,
     'max_lr': .01,
     'optimizer': 'adam',
-    "rnn_hidden_size": 100,
+    "rnn_hidden_size": 300,
     "rnn_type": "lstm",
-    "noise_variance": 0.05,
+    "noise_variance": 0.005,
 
     # for generation
-    'temperature': 0.9,
-    "prompt": "A",
-    "generated_length": 500,
-
-    # meta
-    'seed': 1,
-    'log_interval': 1000,
-
+    "generated_length": 200,
 }
 
 
@@ -177,32 +172,38 @@ class HWModel(pl.LightningModule):
     return correct, total
 
   def loss(self, y_hat, y):
-     # print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
+      #print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
       #print(f'y_hat: [{y_hat[:,:20:]}, {y[:,:20,:]}')
       mse_loss = F.mse_loss(y_hat[:,:,1:], y[:,:,1:]) 
       bce_loss = self.bceWithLogitsLoss(y_hat[:,:,:1], y[:,:,:1])
       #print(f'mse_loss: {mse_loss}, bce_loss = {bce_loss}')
-      return mse_loss + bce_loss
+      return {
+              'total': mse_loss + bce_loss,
+              'xy': mse_loss,
+              'penup': bce_loss,
+      }
 
   def training_step(self, batch, batch_idx, hiddens):
-    #print(f'training_step(batch={batch}, batch_idx={batch_idx}')
     data, y = batch
     #print(f"data.shape {data.shape}")
+    #print(f'training_step(data.shape={data.shape}, batch_idx={batch_idx}')
     y_hat, hiddens = self(data, hiddens)
       
     #correct, total = self.char_accuracy(y_hat, y)
 
-    loss = self.loss(y_hat, y)
+    losses = self.loss(y_hat, y)
     if batch_idx == 0:
         #print(f'epoch: {self.current_epoch} batch: {batch_idx} training loss({y_hat}, {y})')
-        self.log('train_loss', loss, prog_bar=True)
+        self.log('train_loss', losses['total'], prog_bar=True)
+        self.log('train_loss (xy)', losses['xy'], prog_bar=True)
+        self.log('train_loss (penup)', losses['penup'], prog_bar=True)
         #if self.current_epoch == 0:
             #print(f"saving original training image shape: {y[0].shape}")
             #f = plot_stroke(y[0].cpu().numpy())
             #self.logger.experiment.add_figure('original training image', f, self.current_epoch)
     #self.log('train_accuracy', 100.*correct/total)
 
-    return {"loss": loss, "hiddens": hiddens}
+    return {"loss": losses['total'], "hiddens": hiddens}
 
   def validation_step(self, batch, batch_idx):
     #print(f'validation_step (batch={batch}, batch_idx={batch_idx}')
@@ -217,7 +218,7 @@ class HWModel(pl.LightningModule):
       sample = self.generateUnconditionally()
       #print(f'sample: {sample}')
       f = plot_stroke(sample)
-      self.logger.experiment.add_figure('sample as figure', f, self.current_epoch)
+      self.logger.experiment.add_figure('generated HW', f, self.current_epoch)
       #self.logger.experiment.add_text('sample as tensor', str(sample.tolist()), self.current_epoch)
 
 
@@ -270,7 +271,7 @@ class SeqDataset(Dataset):
   def __init__(self, data):
       """data is a numpy array containing different seq*3 arrays"""
       #print(f'SeqDataSet.__init__: data.shape: {data.shape}')
-      self.data = data[:1][:MAX_SEQ+1]
+      self.data = data
 
   def __len__(self):
     #print(f'SeqDataSet len(self.data)={len(self.data)} self.seq_length={self.seq_length}')
@@ -282,7 +283,7 @@ class SeqDataset(Dataset):
     return t[:-1], t[1:]
 
 class HWDataModule(pl.LightningDataModule): 
-    def __init__(self, bs = 1):
+    def __init__(self, bs = args['batch_size']):
 
         super().__init__()
         self.bs = bs
@@ -291,8 +292,10 @@ class HWDataModule(pl.LightningDataModule):
         datadir = hwdir / 'data'
         strokes = np.load(datadir / 'strokes-py3.npy', allow_pickle=True)
         import string
-        self.dataset1 = SeqDataset(strokes[0:1])
-        self.dataset2 = SeqDataset(strokes[1:2])
+        TRAINING_SET_SIZE=args['training_set_size']
+        VALIDATION_SET_SIZE=args['validation_set_size']
+        self.dataset1 = SeqDataset(strokes[:TRAINING_SET_SIZE])
+        self.dataset2 = SeqDataset(strokes[TRAINING_SET_SIZE:TRAINING_SET_SIZE + VALIDATION_SET_SIZE])
 
     def train_dataloader(self):
         return DataLoader(self.train_ds, shuffle=False, batch_size=self.bs, num_workers=24)
@@ -327,14 +330,12 @@ class MyPrintingCallback(Callback):
         dl = data_module.train_dataloader()
         print(f"dl={dl}")
         f = plot_stroke(dl.dataset[0][0].numpy())
-        print(f"size of handwriting: {dl.dataset[0][0].numpy().shape}")
+        #print(f"size of handwriting: {dl.dataset[0][0].numpy().shape}")
         logger.experiment.add_figure('original training image', f, 0)
 
         sample = pl_module.generateUnconditionally()
-        #print(f'sample: {sample}')
         f = plot_stroke(sample)
-        logger.experiment.add_figure('generate before training', f, 0)
-        #self.logger.experiment.add_text('sample as tensor', str(sample.tolist()), self.current_epoch)
+        logger.experiment.add_figure('generate with untrained model', f, 0)
 
 
 
@@ -351,120 +352,3 @@ trainer = pl.Trainer(
 logger.log_hyperparams(args)
 
 trainer.fit(model, datamodule=data_module)    
-"""
-def generateUnconditionally():
-    VERBOSE=False
-    strokeCount=0
-    strokeToCopy= SeqDataset(train_samples)[0]
-
-    def resetModel():
-      nonlocal strokeCount
-      #model.reset_states()
-      strokeCount=0
-
-    def runModel(strokes):
-      # should take the strokes so far and return a single model output
-      # np array of size NUM_OUTPUTS
-
-      if not useFirstTrainingSample:
-        # Run the model.
-        # Input.shape is [batch, sequence_length, input_per_sequence]
-        inputs=torch.reshape(torch.tensor(strokes), (1, len(strokes), 3)).to(device)
-        with torch.no_grad():
-          predictions = model(inputs)
-        #print('predictions.shape', predictions.shape)
-        # Only use the last prediction.
-        prediction = predictions[0, -1, :].cpu().numpy()
-        #print('prediction.shape', prediction.shape)
-        #print('prediction', prediction)
-        return prediction
-      else:
-        # Predict to be like trainX[0]
-        nonlocal strokeCount
-        global trainX
-        sample = trainX[0][strokeCount]
-        strokeCount = strokeCount + 1
-        return np.array([
-                        sample[0], # penUp
-                        1.0, # weight
-                        sample[1], # x mean
-                        sample[2], # y mean
-                        0.1, # x stddev
-                        0.1, # y stddev
-                        0.3, # correlation
-                       ])
-
-    def generateOneStep(prediction):
-      # prediction is of shape NUM_OUTPUTS
-      result = np.zeros((3))
-      nextIndex=1
-      # We calculate based on prediction so that we can run on saved
-      # predictions/models that used a different value for NUM_MIXTURE_COMPONENTS
-      numMixtureComponents = prediction.shape[0] // FEATURES_PER_MIXTURE
-      #print('numMixtureComponents', numMixtureComponents)
-      # weights
-      weights = prediction[nextIndex:nextIndex+numMixtureComponents]
-      nextIndex += numMixtureComponents
-      #print('weights.shape', weights.shape)
-      #print('weights', weights)
-
-      # means
-      hmeans = prediction[nextIndex:nextIndex + numMixtureComponents]
-      nextIndex += numMixtureComponents
-      vmeans = prediction[nextIndex:nextIndex + numMixtureComponents]
-      nextIndex += numMixtureComponents
-      #print('hmeans', hmeans)
-      #print('vmeans', vmeans)
-      means = np.transpose(np.stack([hmeans, vmeans]))
-      #print('means.shape', means.shape)
-
-
-      # standard deviations
-      hstddevs = prediction[nextIndex:nextIndex + numMixtureComponents]
-      nextIndex += numMixtureComponents
-      vstddevs = prediction[nextIndex:nextIndex + numMixtureComponents]
-      nextIndex += numMixtureComponents
-      #print('hstddevs', hstddevs)
-      #print('vstddevs', vstddevs)
-
-      # correlations
-      rhos = prediction[nextIndex:nextIndex + numMixtureComponents*CORRELATIONS_PER_MIXTURE]
-      #print('rhos', rhos)
-      #print('hstddevs*hstddevs', hstddevs*hstddevs)
-      #print('hstddevs*vstddevs*rhos', hstddevs*vstddevs * rhos)
-      cov = np.array([[hstddevs * hstddevs, hstddevs * vstddevs * rhos],
-                [hstddevs * vstddevs * rhos, vstddevs * vstddevs]]).transpose((2, 1, 0))
-
-      #print('cov.shape', cov.shape)
-      #print('cov', cov)
-      #print('means[0]', means[0])
-      #print('cov[0]', cov[0])
-
-      draws = np.array([np.random.multivariate_normal(means[i], cov[i]) for i in range(numMixtureComponents)])
-      #print(f'draws = {draws}')
-      weights = np.reshape(weights, (numMixtureComponents, 1))
-      #print(f'weights = {weights}')
-      weightedDraws = weights*draws
-      #print('weightedDraws', weightedDraws)
-      #print('sum(weightedDraws)', np.sum(weightedDraws, axis=0))
-      result[1:3] = np.sum(weightedDraws, axis=0)
-      # De-normalize
-      result[1:3]  = result[1:3] * stats['std'] + stats['mean']
-      result[0] = 1 if prediction[0] > 0.5 else 0
-      return result.tolist()
-
-    resetModel()
-    stroke = np.zeros((3))
-    strokes = [[0, 0., 0.]]
-    for step in range(180):
-      prediction = runModel(strokes)
-      #print('prediction', prediction)
-      stroke = generateOneStep(prediction)
-      #print('stroke', stroke)
-      strokes.append(stroke)
-    #print(strokes)
-    result = np.asarray(strokes[1:])
-    result[-1,0] = 1 # penup for last stroke
-    #print(result)
-    return result
-        """
