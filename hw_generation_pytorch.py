@@ -18,19 +18,19 @@ args = {
     # for model
     'batch_size': 512,
     'test_batch_size': 128,
-    'epochs':1,
-    'truncated_bptt_steps': 5,
+    'epochs':30,
+    'truncated_bptt_steps': 500,
     'lr': .001,
     'max_lr': .01,
-    'steps_per_epoch': 10,
     'optimizer': 'adam',
     "rnn_hidden_size": 100,
     "rnn_type": "lstm",
+    "noise_variance": 0.05,
 
     # for generation
     'temperature': 0.9,
     "prompt": "A",
-    "generated_length": 30,
+    "generated_length": 500,
 
     # meta
     'seed': 1,
@@ -51,7 +51,7 @@ from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
 import pytorch_lightning as pl
 
-torch.manual_seed(args["seed"])
+#torch.manual_seed(args["seed"])
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda")
 
@@ -71,12 +71,13 @@ def plot_stroke(stroke, save_name=None):
     #print(f'stroke before penup: {stroke}')
     f, ax = pyplot.subplots()
 
-    stroke[-1,0] = 1   #penup so we can see the last part of the stroke
+    #stroke[-1,0] = 1   #penup so we can see the last part of the stroke
     #print(f'stroke after penup: {stroke}')
 
     x = np.cumsum(stroke[:, 1])
     y = np.cumsum(stroke[:, 2])
 
+    #print('entire stroke', x, y)
     size_x = x.max() - x.min() + 1.
     size_y = y.max() - y.min() + 1.
 
@@ -88,9 +89,22 @@ def plot_stroke(stroke, save_name=None):
     start = 0
 
     for cut_value in cuts:
+        #print('black', start, cut_value)
+        #print(x[start:cut_value], y[start:cut_value])
         ax.plot(x[start:cut_value], y[start:cut_value],
                 'k-', linewidth=3)
+        # show pen up part in red
+        if cut_value + 2 < len(y):
+            #print('red', cut_value-1, cut_value+2)
+            ax.plot(x[cut_value-1:cut_value+2], y[cut_value-1:cut_value+2],
+                    'r-', linewidth=2)
         start = cut_value + 1
+
+    # final stroke. Especially important if there were no penups specified
+    last_cut = cuts[-1] if len(cuts) > 0 else 0
+    ax.plot(x[last_cut:len(x)], y[last_cut:len(y)],
+            'r-', linewidth=2)
+
     ax.axis('equal')
     ax.axes.get_xaxis().set_visible(False)
     ax.axes.get_yaxis().set_visible(False)
@@ -115,33 +129,39 @@ class HWModel(pl.LightningModule):
   def __init__(self, lr=.01):
     super().__init__()
     self.hidden_size = args["rnn_hidden_size"]
-    self.lstm = nn.LSTM(input_size=3, hidden_size=self.hidden_size, batch_first=True)
+    self.rnn = nn.GRU(input_size=3, hidden_size=self.hidden_size, batch_first=True)
     self.fc = nn.Linear(self.hidden_size, 3) 
+
     # This is passing back the hiddens but not breaking apart the sequence
     # (e.g., not calling tbptt_split_batch)
     self.truncated_bptt_steps = args['truncated_bptt_steps']
+
     self.learning_rate = lr
     self.bceWithLogitsLoss = torch.nn.BCEWithLogitsLoss()
 
     # Return the hidden tensor(s) to pass to forward
   def getNewHidden(self, batch_size):
-    return (torch.zeros(1, batch_size, self.hidden_size, device=self.device),
-           torch.zeros(1, batch_size, self.hidden_size,device=self.device))
+    if False:
+        # LSTM
+        return (torch.zeros(1, batch_size, self.hidden_size, device=self.device),
+               torch.zeros(1, batch_size, self.hidden_size,device=self.device))
+    else:
+        return torch.zeros(1, batch_size, self.hidden_size, device=self.device)
 
   def forward(self, x, hidden):
     VERBOSE=False
     if VERBOSE:
-      print(f'Forward: size of input: {x.size()}')
+        print(f'Forward: input: {x}, hidden: {hidden}')
 
-    (x, hidden) = self.lstm(x, hidden)
+    (x, hidden) = self.rnn(x, hidden)
 
     if VERBOSE:
       print(f'Forward: size after rnn: {x.size()}')
-      #print(f'Forward: after rnn: {x} ')
+      print(f'Forward: after rnn: {x} ')
     x = self.fc(x)
     if VERBOSE:
       print(f'Forward: size after fc: {x.size()}')
-      #print(f'Forward:  after fc: {x}')
+      print(f'Forward:  after fc: {x}')
     return x, hidden
     
   def char_accuracy(self, output, target):
@@ -161,7 +181,7 @@ class HWModel(pl.LightningModule):
       #print(f'y_hat: [{y_hat[:,:20:]}, {y[:,:20,:]}')
       mse_loss = F.mse_loss(y_hat[:,:,1:], y[:,:,1:]) 
       bce_loss = self.bceWithLogitsLoss(y_hat[:,:,:1], y[:,:,:1])
-      print(f'mse_loss: {mse_loss}, bce_loss = {bce_loss}')
+      #print(f'mse_loss: {mse_loss}, bce_loss = {bce_loss}')
       return mse_loss + bce_loss
 
   def training_step(self, batch, batch_idx, hiddens):
@@ -185,7 +205,7 @@ class HWModel(pl.LightningModule):
     return {"loss": loss, "hiddens": hiddens}
 
   def validation_step(self, batch, batch_idx):
-    #print(f'validation_step')
+    #print(f'validation_step (batch={batch}, batch_idx={batch_idx}')
     data, y = batch
     hidden = self.getNewHidden(batch_size=data.shape[0])
     y_hat, hidden = model(data, hidden)
@@ -201,22 +221,33 @@ class HWModel(pl.LightningModule):
       #self.logger.experiment.add_text('sample as tensor', str(sample.tolist()), self.current_epoch)
 
 
-  def generateUnconditionally(self, output_length=args["generated_length"]):
+  def generateUnconditionally(self, output_length=args["generated_length"], noise_variance=args["noise_variance"]):
     VERBOSE=False
     result = ""
     hidden = self.getNewHidden(batch_size=1)
     output = torch.zeros((output_length+1, 3), device=self.device)
+    noise = torch.randn((output_length+1, 2), device=self.device) * noise_variance
 
-    for step, idx in enumerate(range(output_length)):
+    for idx in range(output_length):
       with torch.no_grad():
+        input = torch.reshape(output[idx], (1, 1, 3))
+        #print(f"generate: input for step {idx}: {input}")
+        #print(f"generate: hidden: {hidden}")
         predictions, hidden = self.forward(torch.reshape(output[idx], (1, 1, 3)), hidden)
-      #print('predictions.shape', predictions.shape)
-      # Only use the last prediction.
-      output[idx, :] = predictions[0, -1, :]
-      output[idx,0] = 1 if predictions[0, -1, 0] > 0 else 0
 
-    # skip first element
+      # Only use the last prediction.
+      output[idx+1, :] = predictions[0, -1, :]
+
+      # Do sampling from the prediction:
+      output[:,1:] = output[:,1:] + noise[idx]
+
+      #print(f'output[{idx+1}] = {output[idx+1]}')
+
+    # skip first (zero) element
     asNumpy = output[1:,:].cpu().numpy()
+
+    asNumpy[:, 0] = np.where(asNumpy[:, 0] > 0, 1, 0)
+    #print(f'final result: {asNumpy}')
     return asNumpy
 
   def configure_optimizers(self):
@@ -296,12 +327,20 @@ class MyPrintingCallback(Callback):
         dl = data_module.train_dataloader()
         print(f"dl={dl}")
         f = plot_stroke(dl.dataset[0][0].numpy())
+        print(f"size of handwriting: {dl.dataset[0][0].numpy().shape}")
         logger.experiment.add_figure('original training image', f, 0)
+
+        sample = pl_module.generateUnconditionally()
+        #print(f'sample: {sample}')
+        f = plot_stroke(sample)
+        logger.experiment.add_figure('generate before training', f, 0)
+        #self.logger.experiment.add_text('sample as tensor', str(sample.tolist()), self.current_epoch)
 
 
 
 trainer = pl.Trainer(
         max_epochs=args["epochs"],
+        num_sanity_val_steps=0,
         accelerator='gpu',
         devices=1,
         logger=logger,
