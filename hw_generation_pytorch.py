@@ -16,21 +16,21 @@ hwdir = Path('/data') / 'neil' / 'hw'
 
 args = {
     # for model
-    'batch_size': 1,
+    'batch_size': 50,
     'test_batch_size': 128,
-    'training_set_size': 1,
+    'training_set_size': 1000,
     'validation_set_size': 1,
-    'epochs':200,
+    'epochs':19,
     'truncated_bptt_steps': 500,
     'lr': .005,
     'max_lr': .01,
     'optimizer': 'adam',
-    "rnn_hidden_size": 300,
+    "rnn_hidden_size": 200,
     "rnn_type": "lstm",
     "noise_variance": 0.005,
 
     # for generation
-    "generated_length": 200,
+    "generated_length": 20,
 }
 
 
@@ -127,10 +127,6 @@ class HWModel(pl.LightningModule):
     self.rnn = nn.GRU(input_size=3, hidden_size=self.hidden_size, batch_first=True)
     self.fc = nn.Linear(self.hidden_size, 3) 
 
-    # This is passing back the hiddens but not breaking apart the sequence
-    # (e.g., not calling tbptt_split_batch)
-    self.truncated_bptt_steps = args['truncated_bptt_steps']
-
     self.learning_rate = lr
     self.bceWithLogitsLoss = torch.nn.BCEWithLogitsLoss()
 
@@ -159,18 +155,6 @@ class HWModel(pl.LightningModule):
       print(f'Forward:  after fc: {x}')
     return x, hidden
     
-  def char_accuracy(self, output, target):
-    mostLikely = torch.argmax(output, dim=2)
-    #rint(f"mostLikely size: {mostLikely.size()}")
-    #print(f"target size: {target.size()}")
-    eq = mostLikely.eq(target.view_as(mostLikely))
-    #print(f"eq: {eq.size()}, {eq}")
-    #print(f"eq.sum(): {eq.sum().size()}, {eq.sum()}")
-    correct = eq.sum().item()
-    total = torch.numel(eq)
-    #print(f"correct, total: {correct}, {total}")
-    return correct, total
-
   def loss(self, y_hat, y):
       #print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
       #print(f'y_hat: [{y_hat[:,:20:]}, {y[:,:20,:]}')
@@ -183,13 +167,18 @@ class HWModel(pl.LightningModule):
               'penup': bce_loss,
       }
 
-  def training_step(self, batch, batch_idx, hiddens):
+  def training_step(self, batch, batch_idx, hiddens=None):
     data, y = batch
     #print(f"data.shape {data.shape}")
+    #print(f"y.shape {y.shape}")
     #print(f'training_step(data.shape={data.shape}, batch_idx={batch_idx}')
+    if hiddens is None:
+        hiddens = self.getNewHidden(batch_size=args['batch_size'])
     y_hat, hiddens = self(data, hiddens)
       
     #correct, total = self.char_accuracy(y_hat, y)
+    #print(f"training: beg of y_hat:{y_hat[0,:5,:].detach().cpu().numpy()}")
+    #print(f"training: beg of y:{y[0,:5,:].detach().cpu().numpy()}")
 
     losses = self.loss(y_hat, y)
     if batch_idx == 0:
@@ -203,6 +192,7 @@ class HWModel(pl.LightningModule):
             #self.logger.experiment.add_figure('original training image', f, self.current_epoch)
     #self.log('train_accuracy', 100.*correct/total)
 
+    return losses['total']
     return {"loss": losses['total'], "hiddens": hiddens}
 
   def validation_step(self, batch, batch_idx):
@@ -244,10 +234,16 @@ class HWModel(pl.LightningModule):
 
       #print(f'output[{idx+1}] = {output[idx+1]}')
 
+    #skip first (zero) element
+    output = output[1:,:]
+    # convert to probabilities
+    output[:,0] = torch.sigmoid(output[:,0])
     # skip first (zero) element
-    asNumpy = output[1:,:].cpu().numpy()
+    asNumpy = output.cpu().numpy()
 
-    asNumpy[:, 0] = np.where(asNumpy[:, 0] > 0, 1, 0)
+    #print(f'before result: {asNumpy}')
+    # Sample whether penUp or penDown based on probability of penUp
+    asNumpy[:, 0] = np.where(asNumpy[:, 0] > np.random.rand(output_length), 1, 0)
     #print(f'final result: {asNumpy}')
     return asNumpy
 
@@ -266,7 +262,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 
 # TODO(neil): make this random sequences rather than fixed?
-MAX_SEQ=200
+MAX_SEQ=300
 class SeqDataset(Dataset):
   def __init__(self, data):
       """data is a numpy array containing different seq*3 arrays"""
@@ -278,7 +274,7 @@ class SeqDataset(Dataset):
     return len(self.data)
 
   def __getitem__(self, idx):
-    t = torch.as_tensor(self.data[idx])
+    t = torch.as_tensor(self.data[idx][:MAX_SEQ])
     #print(f'SeqDataset.getitem({idx}): returning shape:{t.shape}')
     return t[:-1], t[1:]
 
@@ -294,8 +290,9 @@ class HWDataModule(pl.LightningDataModule):
         import string
         TRAINING_SET_SIZE=args['training_set_size']
         VALIDATION_SET_SIZE=args['validation_set_size']
-        self.dataset1 = SeqDataset(strokes[:TRAINING_SET_SIZE])
-        self.dataset2 = SeqDataset(strokes[TRAINING_SET_SIZE:TRAINING_SET_SIZE + VALIDATION_SET_SIZE])
+        self.strokes = strokes
+        #self.dataset1 = SeqDataset(strokes[:TRAINING_SET_SIZE])
+        #self.dataset2 = SeqDataset(strokes[TRAINING_SET_SIZE:TRAINING_SET_SIZE + VALIDATION_SET_SIZE])
 
     def train_dataloader(self):
         return DataLoader(self.train_ds, shuffle=False, batch_size=self.bs, num_workers=24)
@@ -305,12 +302,12 @@ class HWDataModule(pl.LightningDataModule):
 
 
     def setup(self, stage = None):
-        #train_split = int(len(self.dataset)*0.5)
-        #valid_split = len(self.dataset) - train_split
-        #self.train_ds, self.val_ds = random_split(self.dataset, [train_split, valid_split])
-        self.train_ds = self.dataset1   
-        self.val_ds = self.dataset2   
-        #print(f'HWDataModule: len(train_ds) = {len(self.train_ds)}, len(val_ds)={len(self.val_ds)}')
+        train_split = int(len(self.strokes)*0.8)
+        valid_split = len(self.strokes) - train_split
+        train_strokes, valid_strokes = random_split(self.strokes, [train_split, valid_split])
+        self.train_ds = SeqDataset(train_strokes)
+        self.val_ds = SeqDataset(valid_strokes)
+        print(f'HWDataModule: len(train_ds) = {len(self.train_ds)}, len(val_ds)={len(self.val_ds)}')
 
 
 
@@ -338,7 +335,6 @@ class MyPrintingCallback(Callback):
         logger.experiment.add_figure('generate with untrained model', f, 0)
 
 
-
 trainer = pl.Trainer(
         max_epochs=args["epochs"],
         num_sanity_val_steps=0,
@@ -352,3 +348,5 @@ trainer = pl.Trainer(
 logger.log_hyperparams(args)
 
 trainer.fit(model, datamodule=data_module)    
+
+trainer
