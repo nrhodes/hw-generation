@@ -209,7 +209,7 @@ class HWModel(pl.LightningModule):
         predictions, hidden = self.forward(input, hidden)
         if verbose:
             print(f"predictions: {predictions}")
-        output[0] = predictions[-1,0]
+        output[0] = predictions[0, -1]
 
     for idx in range(output_length):
       with torch.no_grad():
@@ -219,7 +219,7 @@ class HWModel(pl.LightningModule):
         predictions, hidden = self.forward(torch.reshape(input, (1, 1, 1)), hidden)
         if verbose:
             print(f"output from forward: {predictions}")
-      output[idx+1] = predictions[-1,0]
+      output[idx+1] = predictions[0, -1]
 
       # Do sampling from the prediction:
       output[idx+1] = output[idx+1] + noise[idx]
