@@ -18,8 +18,8 @@ hwdir = Path('/data') / 'neil' / 'hw'
 
 args = {
     # for model
-    'epochs':10,
-    'batch_size': 20,
+    'epochs':20,
+    'batch_size': 2,
     'lr': .001,
     "rnn_hidden_size": 200,
     "training_noise_variance": 0.01,
@@ -29,7 +29,7 @@ args = {
     "cycles": 10,
 
     # for generation
-    "generated_length": 80,
+    "generated_length": 160,
 }
 
 # %%
@@ -107,9 +107,6 @@ class SinDataset(Dataset):
         self.seq_len=seq_len
         xs = np.linspace(0.0, math.pi*2*cycles, num=self.num_samples, dtype=np.float32)
         self.sins = np.sin(xs)
-        #print(f"sins before diff: {self.sins}")
-        #self.sins[1:] -= self.sins[:-1]
-        #print(f"sins after diff: {self.sins}")
         self.sins = torch.as_tensor(self.sins)
         self.sins = torch.reshape(self.sins, (self.num_samples, 1))
         #print(f"self.sins: {self.sins}")
@@ -118,13 +115,13 @@ class SinDataset(Dataset):
         return self.num_samples-1-self.seq_len
 
     def __getitem__(self, idx):
-        return self.sins[idx:self.seq_len+idx,:], self.sins[self.seq_len+idx, 0]
+        return self.sins[idx:self.seq_len+idx,:], self.sins[idx+1:self.seq_len+idx+1, :]
 
 # %%
 
 d = SinDataset()
 print(len(d))
-d[3]
+d[0]
 
 # %%
 import string
@@ -145,25 +142,25 @@ class HWModel(pl.LightningModule):
     return torch.zeros(1,  batch_size, self.hidden_size, device=self.device)
 
   def forward(self, x, hidden):
-    VERBOSE=False
+    VERBOSE=True
     if VERBOSE:
-        print(f'Forward: input: {x}, hidden: {hidden}')
+        print(f'Forward: input: {x.shape}, hidden: {hidden.shape}')
 
     (x, hidden) = self.rnn(x, hidden)
 
     if VERBOSE:
       print(f'Forward: size after rnn: {x.size()}')
-      print(f'Forward: after rnn: {x} ')
-    x = self.fc(x[:,-1,:])
+      #print(f'Forward: after rnn: {x} ')
+    x = self.fc(x)
     if VERBOSE:
       print(f'Forward: size after fc: {x.size()}')
-      print(f'Forward:  after fc: {x}')
-    return x[:,0], hidden
+      #print(f'Forward:  after fc: {x}')
+    return x, hidden
     
   def loss(self, y_hat, y):
       print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
-      print(f'y_hat, {y_hat}')
-      print(f'y    , {y}')
+      #print(f'y_hat, {y_hat}')
+      #print(f'y    , {y}')
       mse_loss = F.mse_loss(y_hat, y) 
       #print(f'mse_loss: {mse_loss}, bce_loss = {bce_loss}')
       return {
@@ -214,7 +211,7 @@ class HWModel(pl.LightningModule):
         predictions, hidden = self.forward(input, hidden)
         if verbose:
             print(f"predictions: {predictions}")
-        output[0] = predictions[0]
+        output[0] = predictions[-1,0]
 
     for idx in range(output_length):
       with torch.no_grad():
@@ -224,7 +221,7 @@ class HWModel(pl.LightningModule):
         predictions, hidden = self.forward(torch.reshape(input, (1, 1, 1)), hidden)
         if verbose:
             print(f"output from forward: {predictions}")
-      output[idx+1] = predictions[0]
+      output[idx+1] = predictions[-1,0]
 
       # Do sampling from the prediction:
       output[idx+1] = output[idx+1] + noise[idx]
@@ -253,9 +250,9 @@ class HWModel(pl.LightningModule):
 
 model = HWModel()
 model.setup()
-x = model.train_ds[0][0]
-model(torch.unsqueeze(model.train_ds[0][0], 0), model.get_new_hidden(1))
-model.generate_unconditionally(prompt=x, noise_variance=.01)
+#x = model.train_ds[0][0]
+#model(torch.unsqueeze(model.train_ds[0][0], 0), model.get_new_hidden(1))
+#model.generate_unconditionally(prompt=x, noise_variance=.01)
 
 
 
@@ -313,3 +310,5 @@ prediction = model.generate_unconditionally(prompt=prompt, noise_variance=.01)
 plot_stroke(prompt, prediction)
 
 
+
+# %%
