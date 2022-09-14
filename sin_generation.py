@@ -18,18 +18,18 @@ hwdir = Path('/data') / 'neil' / 'hw'
 
 args = {
     # for model
-    'epochs':20,
-    'batch_size': 2,
-    'lr': .001,
+    'epochs':40,
+    'batch_size': 20,
+    'lr': .003,
     "rnn_hidden_size": 200,
-    "training_noise_variance": 0.01,
+    "training_noise_variance": 0.00,
     "generation_noise_variance": 0.01,
     "seq_len": 20,
     "samples_per_cycle": 20,
-    "cycles": 10,
+    "cycles": 5,
 
     # for generation
-    "generated_length": 160,
+    "generated_length": 80,
 }
 
 # %%
@@ -60,7 +60,7 @@ def plot_stroke(prompt, y):
     prompt_samples = prompt.shape[0]
     y_samples = y.shape[0]
     tot_samples = prompt_samples + y_samples
-    upper_bound = tot_samples / args["samples_per_cycle"] * 2 * math.pi
+    upper_bound = (tot_samples / args["samples_per_cycle"]) * 2 * math.pi
     x = np.linspace(0.0, upper_bound, num=tot_samples)
 
     sin = np.sin(x)
@@ -88,10 +88,12 @@ def plot_stroke(prompt, y):
 x = model.train_ds[0][0]
 y=model.train_ds[0][1]
 prompt= x
-prediction = model.generate_unconditionally(prompt=prompt, noise_variance=.01)
+prediction = model.generate_unconditionally(prompt=prompt, noise_variance=.01, verbose=True)
 
-
-print(x, y, prediction)
+print(x.shape, y.shape, prediction.shape)
+print(f'x: {x}')
+print(f'y: {y[-5:]}')
+print(f'prediction: {prediction[:3]}')
 plot_stroke(prompt, prediction)
 
 
@@ -120,8 +122,10 @@ class SinDataset(Dataset):
 # %%
 
 d = SinDataset()
+import inspect
 print(len(d))
 d[0]
+inspect.getmembers(d)
 
 # %%
 import string
@@ -142,7 +146,7 @@ class HWModel(pl.LightningModule):
     return torch.zeros(1,  batch_size, self.hidden_size, device=self.device)
 
   def forward(self, x, hidden):
-    VERBOSE=True
+    VERBOSE=False
     if VERBOSE:
         print(f'Forward: input: {x.shape}, hidden: {hidden.shape}')
 
@@ -158,7 +162,7 @@ class HWModel(pl.LightningModule):
     return x, hidden
     
   def loss(self, y_hat, y):
-      print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
+      #print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
       #print(f'y_hat, {y_hat}')
       #print(f'y    , {y}')
       mse_loss = F.mse_loss(y_hat, y) 
@@ -177,23 +181,17 @@ class HWModel(pl.LightningModule):
     y_hat, hiddens = self(data, hiddens)
 
     losses = self.loss(y_hat, y)
-    if batch_idx == 0:
+    if batch_idx == 0 and not self.trainer.auto_lr_find:
         print(f'epoch: {self.current_epoch} batch: {batch_idx} training loss({losses})')
         self.log('loss_train', losses, prog_bar=True)
-        #if self.current_epoch == 0:
-            #print(f"saving original training image shape: {y[0].shape}")
-            #f = plot_stroke(y[0].cpu().numpy())
-            #self.logger.experiment.add_figure('original training image', f, self.current_epoch)
-    if batch_idx == 0:
-      x = model.train_ds[0][0]
-      sample = self.generate_unconditionally(prompt=x)
-      #print(f'sample: {sample}')
-      f = plot_stroke(x, sample)
-      self.logger.experiment.add_figure('generated sin', f, self.current_epoch)
-      #self.logger.experiment.add_text('sample as tensor', str(sample.tolist()), self.current_epoch)
-    #self.log('train_accuracy', 100.*correct/total)
+        x = model.train_ds[0][0]
+        sample = self.generate_unconditionally(prompt=x)
+        #print(f'sample: {sample}')
+        f = plot_stroke(x, sample)
+        self.logger.experiment.add_figure('generated sin', f, self.current_epoch)
 
-    self.logger.experiment.add_scalars("losses", {"train_loss": losses["total"]})
+    if not self.trainer.auto_lr_find:
+        self.logger.experiment.add_scalars("losses", {"train_loss": losses["total"]})
     return {'loss': losses['total']}
 
   def generate_unconditionally(self, prompt=None, output_length=args["generated_length"], 
@@ -290,6 +288,21 @@ logger.log_hyperparams(args)
 trainer.fit(model)    
 
 trainer
+
+#%%
+trainer = pl.Trainer(
+        auto_lr_find=True,
+        max_epochs=args["epochs"],
+        num_sanity_val_steps=0,
+        accelerator='gpu',
+        devices=1,
+        logger=logger,
+        log_every_n_steps=1,
+        )
+lr_finder = trainer.tuner.lr_find(model, min_lr=1e-3)
+print(lr_finder.results)
+fig = lr_finder.plot(suggest=True)
+fig.show()
 
 
 
