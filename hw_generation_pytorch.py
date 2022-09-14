@@ -16,21 +16,20 @@ hwdir = Path('/data') / 'neil' / 'hw'
 
 args = {
     # for model
-    'batch_size': 50,
-    'test_batch_size': 128,
+    'epochs':1,
+    'batch_size': 700,
+    'test_batch_size': 1024,
     'training_set_size': 1000,
     'validation_set_size': 1,
-    'epochs':19,
-    'truncated_bptt_steps': 500,
-    'lr': .005,
+    'lr': .001,
     'max_lr': .01,
     'optimizer': 'adam',
     "rnn_hidden_size": 200,
-    "rnn_type": "lstm",
-    "noise_variance": 0.005,
+    "rnn_type": "gru",
+    "noise_variance": 0.1,
 
     # for generation
-    "generated_length": 20,
+    "generated_length": 100,
 }
 
 
@@ -118,10 +117,34 @@ def plot_stroke(stroke, save_name=None):
     return f
 
 
+from torch.utils.data import random_split
+from torch.utils.data import DataLoader
+import numpy as np
+
+# TODO(neil): make this random sequences rather than fixed?
+MAX_SEQ=300
+class SeqDataset(Dataset):
+  def __init__(self, data, stats):
+      """data is a numpy array containing different seq*3 arrays"""
+      #print(f'SeqDataSet.__init__: data.shape: {data.shape}')
+      self.data = data
+      self.stats = stats
+
+  def __len__(self):
+    #print(f'SeqDataSet len(self.data)={len(self.data)} self.seq_length={self.seq_length}')
+    return len(self.data)
+
+  def __getitem__(self, idx):
+    asNumpy = self.data[idx][:MAX_SEQ]
+    asNumpy[:,1:] = (asNumpy[:,1:] - self.stats['mean']) / self.stats['std']
+    t = torch.as_tensor(asNumpy)
+    #print(f'SeqDataset.getitem({idx}): returning shape:{t.shape}')
+    return t[:-1], t[1:]
+
 import string
 
 class HWModel(pl.LightningModule):
-  def __init__(self, lr=.01):
+  def __init__(self, lr=args['lr'], bs = args['batch_size']):
     super().__init__()
     self.hidden_size = args["rnn_hidden_size"]
     self.rnn = nn.GRU(input_size=3, hidden_size=self.hidden_size, batch_first=True)
@@ -129,6 +152,7 @@ class HWModel(pl.LightningModule):
 
     self.learning_rate = lr
     self.bceWithLogitsLoss = torch.nn.BCEWithLogitsLoss()
+    self.bs = bs
 
     # Return the hidden tensor(s) to pass to forward
   def getNewHidden(self, batch_size):
@@ -173,7 +197,7 @@ class HWModel(pl.LightningModule):
     #print(f"y.shape {y.shape}")
     #print(f'training_step(data.shape={data.shape}, batch_idx={batch_idx}')
     if hiddens is None:
-        hiddens = self.getNewHidden(batch_size=args['batch_size'])
+        hiddens = self.getNewHidden(batch_size=data.shape[0])
     y_hat, hiddens = self(data, hiddens)
       
     #correct, total = self.char_accuracy(y_hat, y)
@@ -183,17 +207,15 @@ class HWModel(pl.LightningModule):
     losses = self.loss(y_hat, y)
     if batch_idx == 0:
         #print(f'epoch: {self.current_epoch} batch: {batch_idx} training loss({y_hat}, {y})')
-        self.log('train_loss', losses['total'], prog_bar=True)
-        self.log('train_loss (xy)', losses['xy'], prog_bar=True)
-        self.log('train_loss (penup)', losses['penup'], prog_bar=True)
+        self.log('loss_train', losses, prog_bar=True)
         #if self.current_epoch == 0:
             #print(f"saving original training image shape: {y[0].shape}")
             #f = plot_stroke(y[0].cpu().numpy())
             #self.logger.experiment.add_figure('original training image', f, self.current_epoch)
     #self.log('train_accuracy', 100.*correct/total)
 
-    return losses['total']
-    return {"loss": losses['total'], "hiddens": hiddens}
+    self.logger.experiment.add_scalars("losses", {"train_loss": losses["total"]})
+    return {'loss': losses['total']}
 
   def validation_step(self, batch, batch_idx):
     #print(f'validation_step (batch={batch}, batch_idx={batch_idx}')
@@ -201,8 +223,10 @@ class HWModel(pl.LightningModule):
     hidden = self.getNewHidden(batch_size=data.shape[0])
     y_hat, hidden = model(data, hidden)
     #c, t = self.char_accuracy(y_hat, y)
-    loss = self.loss(y_hat, y)
-    self.log("val_loss", loss)
+    losses = self.loss(y_hat, y)
+    self.log("loss_val", losses)
+    self.logger.experiment.add_scalars("losses", {"val_loss": losses["total"]})
+    #self.log('train_loss', losses, prog_bar=True)
     #self.log("val_accuracy", 100. * c / t)
     if batch_idx == 0:
       sample = self.generateUnconditionally()
@@ -210,6 +234,7 @@ class HWModel(pl.LightningModule):
       f = plot_stroke(sample)
       self.logger.experiment.add_figure('generated HW', f, self.current_epoch)
       #self.logger.experiment.add_text('sample as tensor', str(sample.tolist()), self.current_epoch)
+    return {'loss': losses['total']}
 
 
   def generateUnconditionally(self, output_length=args["generated_length"], noise_variance=args["noise_variance"]):
@@ -217,22 +242,20 @@ class HWModel(pl.LightningModule):
     result = ""
     hidden = self.getNewHidden(batch_size=1)
     output = torch.zeros((output_length+1, 3), device=self.device)
-    noise = torch.randn((output_length+1, 2), device=self.device) * noise_variance
+    noise = torch.randn((output_length+1, 3), device=self.device) * noise_variance
+    #print(f"noise: {noise}")
 
     for idx in range(output_length):
       with torch.no_grad():
         input = torch.reshape(output[idx], (1, 1, 3))
-        #print(f"generate: input for step {idx}: {input}")
-        #print(f"generate: hidden: {hidden}")
         predictions, hidden = self.forward(torch.reshape(output[idx], (1, 1, 3)), hidden)
 
       # Only use the last prediction.
       output[idx+1, :] = predictions[0, -1, :]
 
       # Do sampling from the prediction:
-      output[:,1:] = output[:,1:] + noise[idx]
+      output[idx+1] = output[idx+1] + noise[idx]
 
-      #print(f'output[{idx+1}] = {output[idx+1]}')
 
     #skip first (zero) element
     output = output[1:,:]
@@ -240,11 +263,11 @@ class HWModel(pl.LightningModule):
     output[:,0] = torch.sigmoid(output[:,0])
     # skip first (zero) element
     asNumpy = output.cpu().numpy()
+    # denormalize:
+    asNumpy[:,1:] = asNumpy[:,1:] * self.stats['std'] + self.stats['mean']
 
-    #print(f'before result: {asNumpy}')
     # Sample whether penUp or penDown based on probability of penUp
     asNumpy[:, 0] = np.where(asNumpy[:, 0] > np.random.rand(output_length), 1, 0)
-    #print(f'final result: {asNumpy}')
     return asNumpy
 
   def configure_optimizers(self):
@@ -257,58 +280,40 @@ class HWModel(pl.LightningModule):
     #)
     return [optimizer], []
 
-from torch.utils.data import random_split
-from torch.utils.data import DataLoader
-import numpy as np
+  def prepare_data(self):
+      datadir = hwdir / 'data'
+      strokes = np.load(datadir / 'strokes-py3.npy', allow_pickle=True)
+      import string
+      TRAINING_SET_SIZE=args['training_set_size']
+      VALIDATION_SET_SIZE=args['validation_set_size']
+      self.strokes = strokes
 
-# TODO(neil): make this random sequences rather than fixed?
-MAX_SEQ=300
-class SeqDataset(Dataset):
-  def __init__(self, data):
-      """data is a numpy array containing different seq*3 arrays"""
-      #print(f'SeqDataSet.__init__: data.shape: {data.shape}')
-      self.data = data
+  def train_dataloader(self):
+      return DataLoader(self.train_ds, shuffle=False, batch_size=self.bs, num_workers=24)
 
-  def __len__(self):
-    #print(f'SeqDataSet len(self.data)={len(self.data)} self.seq_length={self.seq_length}')
-    return len(self.data)
-
-  def __getitem__(self, idx):
-    t = torch.as_tensor(self.data[idx][:MAX_SEQ])
-    #print(f'SeqDataset.getitem({idx}): returning shape:{t.shape}')
-    return t[:-1], t[1:]
-
-class HWDataModule(pl.LightningDataModule): 
-    def __init__(self, bs = args['batch_size']):
-
-        super().__init__()
-        self.bs = bs
-
-    def prepare_data(self):
-        datadir = hwdir / 'data'
-        strokes = np.load(datadir / 'strokes-py3.npy', allow_pickle=True)
-        import string
-        TRAINING_SET_SIZE=args['training_set_size']
-        VALIDATION_SET_SIZE=args['validation_set_size']
-        self.strokes = strokes
-        #self.dataset1 = SeqDataset(strokes[:TRAINING_SET_SIZE])
-        #self.dataset2 = SeqDataset(strokes[TRAINING_SET_SIZE:TRAINING_SET_SIZE + VALIDATION_SET_SIZE])
-
-    def train_dataloader(self):
-        return DataLoader(self.train_ds, shuffle=False, batch_size=self.bs, num_workers=24)
-
-    def val_dataloader(self):
-        return DataLoader(self.val_ds, shuffle=False, batch_size=self.bs, num_workers=24)
+  def val_dataloader(self):
+      return DataLoader(self.val_ds, shuffle=False, batch_size=self.bs, num_workers=24)
 
 
-    def setup(self, stage = None):
-        train_split = int(len(self.strokes)*0.8)
-        valid_split = len(self.strokes) - train_split
-        train_strokes, valid_strokes = random_split(self.strokes, [train_split, valid_split])
-        self.train_ds = SeqDataset(train_strokes)
-        self.val_ds = SeqDataset(valid_strokes)
-        print(f'HWDataModule: len(train_ds) = {len(self.train_ds)}, len(val_ds)={len(self.val_ds)}')
+  def setup(self, stage = None):
+      train_split = int(len(self.strokes)*0.9)
+      valid_split = len(self.strokes) - train_split
+      train_strokes, valid_strokes = random_split(self.strokes, [train_split, valid_split])
 
+      def calc_stats(values):
+        totals = None
+        upDowns = [stroke[:, 0] for stroke in values]
+        meanUps = np.concatenate([stroke[:, 0] for stroke in values]).mean()
+        shapes = [stroke[:, 1:] for stroke in values]
+        totals = np.concatenate(shapes)
+        return {'mean': totals.mean(axis=0), 'std': totals.std(axis=0), 'meanUps':meanUps}
+
+      self.stats = calc_stats(train_strokes)
+      print(f'stats: {self.stats}')
+
+      self.train_ds = SeqDataset(train_strokes, self.stats)
+      self.val_ds = SeqDataset(valid_strokes, self.stats)
+      print(f'HWDataModule: len(train_ds) = {len(self.train_ds)}, len(val_ds)={len(self.val_ds)}')
 
 
 model = HWModel()
@@ -320,19 +325,21 @@ logger = TensorBoardLogger(save_dir="/data/neil/runs", name="hw_generation-light
 
 lr_monitor = LearningRateMonitor(logging_interval='step')
 
-data_module = HWDataModule()
 class MyPrintingCallback(Callback):
     def on_train_start(self, trainer, pl_module):
-        print("Training is starting")
-        dl = data_module.train_dataloader()
-        print(f"dl={dl}")
-        f = plot_stroke(dl.dataset[0][0].numpy())
+        #print("Training is starting")
+        dl = model.train_dataloader()
+        #print(f"dl={dl}")
+        asNumpy = dl.dataset[0][0].numpy()
+        asNumpy[:,1:] = asNumpy[:,1:] * model.stats['std'] + model.stats['mean']
+        f = plot_stroke(asNumpy)
         #print(f"size of handwriting: {dl.dataset[0][0].numpy().shape}")
         logger.experiment.add_figure('original training image', f, 0)
 
-        sample = pl_module.generateUnconditionally()
-        f = plot_stroke(sample)
-        logger.experiment.add_figure('generate with untrained model', f, 0)
+        for noise_variance in [0.5, 0.1, 0.05, 0.01, 0.005, 0.001]: #
+          sample = pl_module.generateUnconditionally(noise_variance=noise_variance)
+          f = plot_stroke(sample)
+          logger.experiment.add_figure(f'generate with untrained model (noise variance = {noise_variance})', f, 0)
 
 
 trainer = pl.Trainer(
@@ -347,6 +354,6 @@ trainer = pl.Trainer(
 
 logger.log_hyperparams(args)
 
-trainer.fit(model, datamodule=data_module)    
+trainer.fit(model)    
 
 trainer
