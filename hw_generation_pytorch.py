@@ -7,13 +7,12 @@
 
 import matplotlib.pyplot as pyplot
 from pathlib import Path
-from PIL import Image
+import math
+import random
 from pytorch_lightning.callbacks import Callback
 
-from torchvision import transforms
 
 
-import requests
 hwdir = Path('/data') / 'neil' / 'hw'
 
 args = {
@@ -85,29 +84,30 @@ def plot_stroke(stroke, prompt=None, remainder=None, save_name=None):
     size_x = x.max() - x.min() + 1.
     size_y = y.max() - y.min() + 1.
 
-    f.set_size_inches(5. * size_x / size_y, 5.)
+    f.set_size_inches(7., 4.)
 
     cuts = np.where(stroke[:, 0] == 1)[0]
     #print(f'np.where(stroke[:, 0] == 1): {np.where(stroke[:, 0] == 1)}')
     #print(f'plot_stroke: cuts={cuts}')
     start = 0
 
-    # for cut_value in cuts:
-    #     #print('black', start, cut_value)
-    #     #print(x[start:cut_value], y[start:cut_value])
-    #     ax.plot(x[start:cut_value], y[start:cut_value],
-    #             'k-', linewidth=3)
-    #     # show pen up part in red
-    #     if cut_value + 2 < len(y):
-    #         #print('red', cut_value-1, cut_value+2)
-    #         ax.plot(x[cut_value-1:cut_value+2], y[cut_value-1:cut_value+2],
-    #                 'r-', linewidth=2)
-    #     start = cut_value + 1
+    for cut_value in cuts:
+        #print('black', start, cut_value)
+        #print(x[start:cut_value], y[start:cut_value])
+        ax.plot(x[start:cut_value], y[start:cut_value],
+                'k-', linewidth=3)
+        # show pen up part in red
+        if cut_value + 2 < len(y):
+            #print('red', cut_value-1, cut_value+2)
+            ax.plot(x[cut_value-1:cut_value+2], y[cut_value-1:cut_value+2],
+                    'r-', linewidth=2)
+        start = cut_value + 1
 
-    # # final stroke. Especially important if there were no penups specified
-    # last_cut = cuts[-1] if len(cuts) > 0 else 0
-    # ax.plot(x[last_cut:len(x)], y[last_cut:len(y)],
-    #         'r-', linewidth=2)
+    # final stroke. Especially important if there were no penups specified
+    last_cut = cuts[-1] if len(cuts) > 0 else 0
+    ax.plot(x[last_cut:len(x)], y[last_cut:len(y)],
+            'r-', linewidth=2)
+
 
     ax.axis('equal')
     ax.axes.get_xaxis().set_visible(False)
@@ -178,12 +178,12 @@ if True:
 
     train_ds = SeqDataset(train_strokes, stats)
 
-    first = train_ds[0][0].numpy()
+    first = train_ds[0][0]
     first[:,1:] = (first[:,1:] * stats['std']) + stats['mean']
     prompt = first[:30,:]
     last=first[30:,:]
-    generated=np.copy(first[30:,:])
-    generated[:,1:] = generated[:,1:] + np.random.rand(generated.shape[0], 2)*1
+    generated=np.copy(last)
+    generated[:,1:] = generated[:,1:] + (np.random.rand(generated.shape[0], 2)-0.5)*3
     plot_stroke(generated, prompt=prompt, remainder=last)
 
 #%%
@@ -195,7 +195,7 @@ class HWModel(pl.LightningModule):
     super().__init__()
     self.hidden_size = args["rnn_hidden_size"]
     self.rnn = nn.GRU(input_size=3, hidden_size=self.hidden_size, batch_first=True)
-    self.fc = nn.Linear(self.hidden_size, 3) 
+    self.fc = nn.Linear(self.hidden_size, 5) 
 
     self.learning_rate = lr
     self.bceWithLogitsLoss = torch.nn.BCEWithLogitsLoss()
@@ -224,17 +224,24 @@ class HWModel(pl.LightningModule):
     if VERBOSE:
       print(f'Forward: size after fc: {x.size()}')
       print(f'Forward:  after fc: {x}')
+    x[:,:,3:] = torch.exp(x[:,:,3:])   # convert to non-negative std dev
     return x, hidden
     
+  def xy_loss(self, yhat, y):
+    mean = yhat[:,:,0:2]
+    stddev = yhat[:,:,2:4]
+    losses = ((mean - y)**2)/(2*stddev**2)  + torch.log(stddev)
+    return torch.mean(losses)
+
   def loss(self, y_hat, y):
       #print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
       #print(f'y_hat: [{y_hat[:,:20:]}, {y[:,:20,:]}')
-      mse_loss = F.mse_loss(y_hat[:,:,1:], y[:,:,1:]) 
+      xy_loss = self.xy_loss(y_hat[:,:,1:], y[:,:,1:]) 
       bce_loss = self.bceWithLogitsLoss(y_hat[:,:,:1], y[:,:,:1])
       #print(f'mse_loss: {mse_loss}, bce_loss = {bce_loss}')
       return {
-              'total': mse_loss + bce_loss,
-              'xy': mse_loss,
+              'total': xy_loss + bce_loss,
+              'xy': xy_loss,
               'penup': bce_loss,
       }
 
@@ -288,13 +295,21 @@ class HWModel(pl.LightningModule):
     return {'loss': losses['total']}
 
 
+
   def generate_unconditionally(self, prompt=None, output_length=args["generated_length"], noise_variance=args["noise_variance"],
         verbose=False):
-    result = ""
     hidden = self.getNewHidden(batch_size=1)
     output = torch.zeros((output_length+1, 3), device=self.device)
-    noise = torch.randn((output_length+1, 3), device=self.device) * noise_variance
     #print(f"noise: {noise}")
+
+    def sample_from_prediction(prediction):
+        print(f'sample_from_prediction: {prediction}')
+        result = torch.zeros((3))
+        result[0] = 1 if  torch.sigmoid(prediction[0]) > random.random() else 0
+        # generate andom values with given means and standard devs  
+        result[1:] = torch.normal(prediction[1:3], prediction[3:5])
+        return result
+
 
     if prompt is not None:
         prompt = prompt.type_as(hidden)
@@ -305,7 +320,7 @@ class HWModel(pl.LightningModule):
         predictions, hidden = self.forward(input, hidden)
         if verbose:
             print(f"predictions: {predictions}")
-        output[0] = predictions[0, -1, :]
+        output[0] = sample_from_prediction(predictions[0, -1, :])
 
     for idx in range(output_length):
       with torch.no_grad():
@@ -313,23 +328,20 @@ class HWModel(pl.LightningModule):
         predictions, hidden = self.forward(torch.reshape(output[idx], (1, 1, 3)), hidden)
 
       # Only use the last prediction.
-      output[idx+1, :] = predictions[0, -1, :]
-
-      # Do sampling from the prediction:
-      output[idx+1] = output[idx+1] + noise[idx]
+      output[idx+1, :] = sample_from_prediction(predictions[0, -1, :])
 
 
     if prompt is not None:
         #skip first (zero) element
         output = output[1:,:]
     # convert to probabilities
-    output[:,0] = torch.sigmoid(output[:,0])
+    #output[:,0] = torch.sigmoid(output[:,0])
     asNumpy = output.cpu().numpy()
     # denormalize:
     asNumpy[:,1:] = asNumpy[:,1:] * self.stats['std'] + self.stats['mean']
 
     # Sample whether penUp or penDown based on probability of penUp
-    asNumpy[:, 0] = np.where(asNumpy[:, 0] > np.random.rand(asNumpy.shape[0]), 1, 0)
+   # asNumpy[:, 0] = np.where(asNumpy[:, 0] > np.random.rand(asNumpy.shape[0]), 1, 0)
     return asNumpy
 
   def configure_optimizers(self):
