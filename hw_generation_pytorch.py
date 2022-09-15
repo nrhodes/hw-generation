@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """Char generation PyTorch.ipynb
 """
+#%%
+3+4
+#%%
 
-import io
 import matplotlib.pyplot as pyplot
 from pathlib import Path
 from PIL import Image
@@ -16,13 +18,9 @@ hwdir = Path('/data') / 'neil' / 'hw'
 
 args = {
     # for model
-    'epochs':1,
-    'batch_size': 700,
-    'test_batch_size': 1024,
-    'training_set_size': 1000,
-    'validation_set_size': 1,
+    'epochs':17,
+    'batch_size': 400,
     'lr': .001,
-    'max_lr': .01,
     'optimizer': 'adam',
     "rnn_hidden_size": 200,
     "rnn_type": "gru",
@@ -33,6 +31,7 @@ args = {
 }
 
 
+#%%
 """# Initialization"""
 
 
@@ -50,8 +49,6 @@ use_cuda = torch.cuda.is_available()
 device = torch.device("cuda")
 
 
-
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -60,16 +57,29 @@ import torch.optim as optim
 from torch.utils.data import Dataset
 from torch.utils.data import Sampler
 
-def plot_stroke(stroke, save_name=None):
+def plot_stroke(stroke, prompt=None, remainder=None, save_name=None):
     # Plot a single example.
     #print(f'stroke before penup: {stroke}')
     f, ax = pyplot.subplots()
 
-    #stroke[-1,0] = 1   #penup so we can see the last part of the stroke
-    #print(f'stroke after penup: {stroke}')
+    if torch.is_tensor(stroke):
+        stroke = stroke.numpy()
+    if torch.is_tensor(prompt):
+        prompt = prompt.numpy()
+    if torch.is_tensor(remainder):
+        remainder = remainder.numpy()
 
-    x = np.cumsum(stroke[:, 1])
-    y = np.cumsum(stroke[:, 2])
+    first_x = 0
+    first_y = 0
+    if prompt is not None:
+        x_prompt = np.cumsum(prompt[:, 1])
+        y_prompt = np.cumsum(prompt[:, 2])
+        ax.plot(x_prompt, y_prompt, 'b-', linewidth=1)
+        first_x = x_prompt[-1]
+        first_y = y_prompt[-1]
+
+    x = np.cumsum(stroke[:, 1]) + first_x
+    y = np.cumsum(stroke[:, 2]) + first_y
 
     #print('entire stroke', x, y)
     size_x = x.max() - x.min() + 1.
@@ -82,26 +92,33 @@ def plot_stroke(stroke, save_name=None):
     #print(f'plot_stroke: cuts={cuts}')
     start = 0
 
-    for cut_value in cuts:
-        #print('black', start, cut_value)
-        #print(x[start:cut_value], y[start:cut_value])
-        ax.plot(x[start:cut_value], y[start:cut_value],
-                'k-', linewidth=3)
-        # show pen up part in red
-        if cut_value + 2 < len(y):
-            #print('red', cut_value-1, cut_value+2)
-            ax.plot(x[cut_value-1:cut_value+2], y[cut_value-1:cut_value+2],
-                    'r-', linewidth=2)
-        start = cut_value + 1
+    # for cut_value in cuts:
+    #     #print('black', start, cut_value)
+    #     #print(x[start:cut_value], y[start:cut_value])
+    #     ax.plot(x[start:cut_value], y[start:cut_value],
+    #             'k-', linewidth=3)
+    #     # show pen up part in red
+    #     if cut_value + 2 < len(y):
+    #         #print('red', cut_value-1, cut_value+2)
+    #         ax.plot(x[cut_value-1:cut_value+2], y[cut_value-1:cut_value+2],
+    #                 'r-', linewidth=2)
+    #     start = cut_value + 1
 
-    # final stroke. Especially important if there were no penups specified
-    last_cut = cuts[-1] if len(cuts) > 0 else 0
-    ax.plot(x[last_cut:len(x)], y[last_cut:len(y)],
-            'r-', linewidth=2)
+    # # final stroke. Especially important if there were no penups specified
+    # last_cut = cuts[-1] if len(cuts) > 0 else 0
+    # ax.plot(x[last_cut:len(x)], y[last_cut:len(y)],
+    #         'r-', linewidth=2)
 
     ax.axis('equal')
     ax.axes.get_xaxis().set_visible(False)
     ax.axes.get_yaxis().set_visible(False)
+
+    if remainder is not None:
+        x_rem = np.cumsum(remainder[:, 1]) + first_x
+        y_rem = np.cumsum(remainder[:, 2]) + first_y
+        print(f'x_rem', x_rem)
+        print(f'y_rem', y_rem)
+        ax.plot(x_rem, y_rem, 'g-', linewidth=1)
 
     if save_name is None:
         pyplot.show()
@@ -116,30 +133,60 @@ def plot_stroke(stroke, save_name=None):
 
     return f
 
-
+#%%
 from torch.utils.data import random_split
 from torch.utils.data import DataLoader
 import numpy as np
 
-# TODO(neil): make this random sequences rather than fixed?
-MAX_SEQ=300
 class SeqDataset(Dataset):
-  def __init__(self, data, stats):
+  def __init__(self, strokes, stats, chop_length=60):
       """data is a numpy array containing different seq*3 arrays"""
       #print(f'SeqDataSet.__init__: data.shape: {data.shape}')
-      self.data = data
       self.stats = stats
+      self.data = []
+      for stroke in strokes:
+        stroke[:, 1:] = stroke[:, 1:] - self.stats['mean'] / self.stats['std']
+        for i in range(stroke.shape[0] // chop_length):
+            self.data.append(stroke[i*chop_length:(i+1)*chop_length])
 
   def __len__(self):
     #print(f'SeqDataSet len(self.data)={len(self.data)} self.seq_length={self.seq_length}')
     return len(self.data)
 
   def __getitem__(self, idx):
-    asNumpy = self.data[idx][:MAX_SEQ]
-    asNumpy[:,1:] = (asNumpy[:,1:] - self.stats['mean']) / self.stats['std']
-    t = torch.as_tensor(asNumpy)
-    #print(f'SeqDataset.getitem({idx}): returning shape:{t.shape}')
+    t = torch.as_tensor(self.data[idx])
     return t[:-1], t[1:]
+
+#%%
+3+4
+if True:
+    datadir = hwdir / 'data'
+    strokes = np.load(datadir / 'strokes-py3.npy', allow_pickle=True)
+    strokes[0].shape[0]
+
+    train_strokes = strokes[:1]
+
+    def calc_stats(values):
+        totals = None
+        meanUps = np.concatenate([stroke[:, 0] for stroke in values]).mean()
+        shapes = [stroke[:, 1:] for stroke in values]
+        totals = np.concatenate(shapes)
+        return {'mean': totals.mean(axis=0), 'std': totals.std(axis=0), 'meanUps':meanUps}
+
+    stats = calc_stats(train_strokes)
+    #print(f'stats: {stats}')
+
+    train_ds = SeqDataset(train_strokes, stats)
+
+    first = train_ds[0][0].numpy()
+    first[:,1:] = (first[:,1:] * stats['std']) + stats['mean']
+    prompt = first[:30,:]
+    last=first[30:,:]
+    generated=np.copy(first[30:,:])
+    generated[:,1:] = generated[:,1:] + np.random.rand(generated.shape[0], 2)*1
+    plot_stroke(generated, prompt=prompt, remainder=last)
+
+#%%
 
 import string
 
@@ -205,9 +252,10 @@ class HWModel(pl.LightningModule):
     #print(f"training: beg of y:{y[0,:5,:].detach().cpu().numpy()}")
 
     losses = self.loss(y_hat, y)
+    self.log('loss_train', losses, prog_bar=True)
     if batch_idx == 0:
+        pass
         #print(f'epoch: {self.current_epoch} batch: {batch_idx} training loss({y_hat}, {y})')
-        self.log('loss_train', losses, prog_bar=True)
         #if self.current_epoch == 0:
             #print(f"saving original training image shape: {y[0].shape}")
             #f = plot_stroke(y[0].cpu().numpy())
@@ -224,26 +272,40 @@ class HWModel(pl.LightningModule):
     y_hat, hidden = model(data, hidden)
     #c, t = self.char_accuracy(y_hat, y)
     losses = self.loss(y_hat, y)
-    self.log("loss_val", losses)
+    #self.log("loss_val", losses)
     self.logger.experiment.add_scalars("losses", {"val_loss": losses["total"]})
     #self.log('train_loss', losses, prog_bar=True)
     #self.log("val_accuracy", 100. * c / t)
     if batch_idx == 0:
-      sample = self.generateUnconditionally()
+      prompt=self.train_ds[0][0][:30,:]
+      remainder=self.train_ds[0][0][30:,:]
+      sample = self.generate_unconditionally(prompt)
       #print(f'sample: {sample}')
-      f = plot_stroke(sample)
+      print(f'generated HW epoch: {self.current_epoch}')
+      f = plot_stroke(sample, prompt=prompt, remainder=remainder)
       self.logger.experiment.add_figure('generated HW', f, self.current_epoch)
       #self.logger.experiment.add_text('sample as tensor', str(sample.tolist()), self.current_epoch)
     return {'loss': losses['total']}
 
 
-  def generateUnconditionally(self, output_length=args["generated_length"], noise_variance=args["noise_variance"]):
-    VERBOSE=False
+  def generate_unconditionally(self, prompt=None, output_length=args["generated_length"], noise_variance=args["noise_variance"],
+        verbose=False):
     result = ""
     hidden = self.getNewHidden(batch_size=1)
     output = torch.zeros((output_length+1, 3), device=self.device)
     noise = torch.randn((output_length+1, 3), device=self.device) * noise_variance
     #print(f"noise: {noise}")
+
+    if prompt is not None:
+        prompt = prompt.type_as(hidden)
+        with torch.no_grad():
+            input = torch.unsqueeze(prompt, 0)
+        if verbose:
+            print(f"prompt: input to forward: {input}")
+        predictions, hidden = self.forward(input, hidden)
+        if verbose:
+            print(f"predictions: {predictions}")
+        output[0] = predictions[0, -1, :]
 
     for idx in range(output_length):
       with torch.no_grad():
@@ -257,17 +319,17 @@ class HWModel(pl.LightningModule):
       output[idx+1] = output[idx+1] + noise[idx]
 
 
-    #skip first (zero) element
-    output = output[1:,:]
+    if prompt is not None:
+        #skip first (zero) element
+        output = output[1:,:]
     # convert to probabilities
     output[:,0] = torch.sigmoid(output[:,0])
-    # skip first (zero) element
     asNumpy = output.cpu().numpy()
     # denormalize:
     asNumpy[:,1:] = asNumpy[:,1:] * self.stats['std'] + self.stats['mean']
 
     # Sample whether penUp or penDown based on probability of penUp
-    asNumpy[:, 0] = np.where(asNumpy[:, 0] > np.random.rand(output_length), 1, 0)
+    asNumpy[:, 0] = np.where(asNumpy[:, 0] > np.random.rand(asNumpy.shape[0]), 1, 0)
     return asNumpy
 
   def configure_optimizers(self):
@@ -283,9 +345,6 @@ class HWModel(pl.LightningModule):
   def prepare_data(self):
       datadir = hwdir / 'data'
       strokes = np.load(datadir / 'strokes-py3.npy', allow_pickle=True)
-      import string
-      TRAINING_SET_SIZE=args['training_set_size']
-      VALIDATION_SET_SIZE=args['validation_set_size']
       self.strokes = strokes
 
   def train_dataloader(self):
@@ -300,9 +359,10 @@ class HWModel(pl.LightningModule):
       valid_split = len(self.strokes) - train_split
       train_strokes, valid_strokes = random_split(self.strokes, [train_split, valid_split])
 
+      train_strokes = self.strokes[:1]
+      valid_strokes = self.strokes[1:2]
       def calc_stats(values):
         totals = None
-        upDowns = [stroke[:, 0] for stroke in values]
         meanUps = np.concatenate([stroke[:, 0] for stroke in values]).mean()
         shapes = [stroke[:, 1:] for stroke in values]
         totals = np.concatenate(shapes)
@@ -332,12 +392,14 @@ class MyPrintingCallback(Callback):
         #print(f"dl={dl}")
         asNumpy = dl.dataset[0][0].numpy()
         asNumpy[:,1:] = asNumpy[:,1:] * model.stats['std'] + model.stats['mean']
+        print(f'original training image')
         f = plot_stroke(asNumpy)
         #print(f"size of handwriting: {dl.dataset[0][0].numpy().shape}")
         logger.experiment.add_figure('original training image', f, 0)
 
         for noise_variance in [0.5, 0.1, 0.05, 0.01, 0.005, 0.001]: #
-          sample = pl_module.generateUnconditionally(noise_variance=noise_variance)
+          sample = pl_module.generate_unconditionally(noise_variance=noise_variance)
+          print(f'generated from untrained model (noise={noise_variance})')
           f = plot_stroke(sample)
           logger.experiment.add_figure(f'generate with untrained model (noise variance = {noise_variance})', f, 0)
 
@@ -357,3 +419,5 @@ logger.log_hyperparams(args)
 trainer.fit(model)    
 
 trainer
+
+# %%
