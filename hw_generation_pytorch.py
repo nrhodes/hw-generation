@@ -116,8 +116,8 @@ def plot_stroke(stroke, prompt=None, remainder=None, save_name=None):
     if remainder is not None:
         x_rem = np.cumsum(remainder[:, 1]) + first_x
         y_rem = np.cumsum(remainder[:, 2]) + first_y
-        print(f'x_rem', x_rem)
-        print(f'y_rem', y_rem)
+        #print(f'x_rem', x_rem)
+        #print(f'y_rem', y_rem)
         ax.plot(x_rem, y_rem, 'g-', linewidth=1)
 
     if save_name is None:
@@ -303,7 +303,7 @@ class HWModel(pl.LightningModule):
     #print(f"noise: {noise}")
 
     def sample_from_prediction(prediction):
-        print(f'sample_from_prediction: {prediction}')
+        #print(f'sample_from_prediction: {prediction}')
         result = torch.zeros((3))
         result[0] = 1 if  torch.sigmoid(prediction[0]) > random.random() else 0
         # generate andom values with given means and standard devs  
@@ -371,8 +371,8 @@ class HWModel(pl.LightningModule):
       valid_split = len(self.strokes) - train_split
       train_strokes, valid_strokes = random_split(self.strokes, [train_split, valid_split])
 
-      train_strokes = self.strokes[:1]
-      valid_strokes = self.strokes[1:2]
+      #train_strokes = self.strokes[:1]
+      #valid_strokes = self.strokes[1:2]
       def calc_stats(values):
         totals = None
         meanUps = np.concatenate([stroke[:, 0] for stroke in values]).mean()
