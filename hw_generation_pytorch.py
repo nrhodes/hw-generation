@@ -79,10 +79,14 @@
 
 # Run 123: Compute loss using MultivariateDistribution (with a single component)
 # loss will now be on different scale
-# loss: 
+# loss: .5095
 
 # Run 134: Do sampling MultivariateDistribution (with a single component)
+# loss: .504
+
+# Run 141: Add correlation (with a single component)
 # loss: 
+
 
 #%%
 
@@ -288,7 +292,7 @@ class HWModel(pl.LightningModule):
     super().__init__()
     self.hidden_size = args["rnn_hidden_size"]
     self.rnn = nn.GRU(input_size=3, hidden_size=self.hidden_size, batch_first=True)
-    self.fc = nn.Linear(self.hidden_size, 1+5*num_components) 
+    self.fc = nn.Linear(self.hidden_size, 1+6*num_components) 
     self.num_components = num_components
 
     self.learning_rate = lr
@@ -322,25 +326,16 @@ class HWModel(pl.LightningModule):
     # Order of output is:
     # 0: penup/down
     # [1:1+num_components]: mean-x
-    # [1+num_components:1+2*num_components]: mean-y
-    # [1+2*num_componets: 1+3_num_components: std-x
-    # [1+3_num_componets: 1+4_num_components: std-y
-    # [1+4_num_componets: 1+5_num_components: weighting factor
+    # [1+num_componennts:1+2*num_components]: mean-y
+    # [1+2*num_components: 1+3_num_components: std-x
+    # [1+3_num_components: 1+4_num_components: std-y
+    # [1+3_num_components: 1+4_num_components: correlation
+    # [1+4_num_components: 1+5_num_components: weighting factor
     x_new = x.clone()
     x_new[:,:, 1+2*nc:1+4*nc] = torch.exp(x[:,:, 1+2*nc:1+4*nc])   # convert to non-negative std dev
     x_new[:,:, 1+4*nc:1+5*nc] = F.softmax(x[:,:, 1+4*nc:1+5*nc], dim=2)   # convert to %
+    x_new[:,:, 1+5*nc:1+6*nc] = torch.tanh(x[:,:, 1+5*nc:1+6*nc])   # convert to range (-1, 1)
     
-    if args['force_to_1_component']:
-        x_new[:,:,1+4*nc:1+5*nc] = 0.0
-        x_new[:,:,1+4*nc] = 1.0
-    if nc == 1:
-        x_new2 = x.clone()
-        x_new2[:,:,3:] = torch.exp(x[:,:,3:])   # convert to non-negative std dev
-        if not torch.equal(x_new2[:,:,:4], x_new[:,:,:4]):
-            print('forward: not equal old/new way')
-            print(x_new2)
-            print(x_new)
-            1/0
     return x_new, hidden
     
   def construct_distribution(self, yhat):
@@ -349,30 +344,28 @@ class HWModel(pl.LightningModule):
     # takes all but the penup/down part of the yhat
     mean = yhat[:,:,0:2]
     stddev = yhat[:,:,2*nc:2*nc+2]
-    covariance = torch.zeros(bs, seq_len, 2, 2, device=self.device)
-    # TODO(neil): add correlation
+    correlation = yhat[:,:,5*nc:5*nc+1]
+    covariance = torch.ones(bs, seq_len, 2, 2, device=self.device)
+    #print(f'correlation shape: {correlation.shape}')
+    #print(f'covariance shape: {covariance.shape}')
+    
+    minor_diagonal = stddev[:, :, 0] * stddev[:, :, 1] * correlation[:, :, 0]
+    #print(f'minor_diagonal shape: {minor_diagonal.shape}')
+    # Set major diagonal
     covariance[:, :, 0, 0] = stddev[:, :, 0] **2
     covariance[:, :, 1, 1] = stddev[:, :, 1] **2
+     # Set minor diagonal
+    covariance[:, :, 1, 0] = minor_diagonal
+    covariance[:, :, 0, 1] = minor_diagonal
     #print(f'covariance shape: {covariance.shape}')
     return MultivariateNormal(mean, covariance, validate_args=True)
 
   def xy_loss(self, yhat, y, verbose=False):
     nc = self.num_components
-    bs, seq_len, _ = yhat.shape
-    if nc == 1 or args['force_to_1_component']:
-        mean_oldway = yhat[:,:,0:2]
-        stddev_oldway = yhat[:,:,2*nc:2*nc+2]
-        #print(f'old way: mean={mean_oldway[0,0,1]}, stddev={stddev_oldway[0,0,1]}, y={y[0,0,1]}')
-        losses_oldway = ((mean_oldway - y)**2)/(2*stddev_oldway**2)  + torch.log(stddev_oldway)  
-        losses_oldway = torch.sum(losses_oldway, dim=2)
-        covariance = torch.zeros(bs, seq_len, 2, 2, device=self.device)
-        covariance[:, :, 0, 0] = stddev_oldway[:, :, 0] **2
-        covariance[:, :, 1, 1] = stddev_oldway[:, :, 1] **2
-        #print(f'covariance shape: {covariance.shape}')
-        mc = self.construct_distribution(yhat)
-        losses = mc.log_prob(y)
-        #print(f'loss shape: {losses.shape}')
-        return -losses
+    mc = self.construct_distribution(yhat)
+    losses = mc.log_prob(y)
+    #print(f'loss shape: {losses.shape}')
+    return -losses
     if verbose:
         #print(f'yhat: {yhat.shape}')
         print(f'y: {y.shape}')
