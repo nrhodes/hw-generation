@@ -3,10 +3,55 @@
 """
 #%%
 3+4
+
+# run 3: max_seq_len: 12, seq_chop_len: 12, max_training: 1, max_validation: 1 epochs: 80
+# loss -1.3
+
+# run 4: max_seq_len: 12, seq_chop_len: 12, max_training: 1, max_validation: 1 epochs: 40, tbtt: 60
+# loss 0.527 (but loss not calculated right for tbtt)
+
+# run 5:  disable tbtt
+# loss 0.42
+
+# run 13: redo calc of loss with tbtt
+# loss .4937
+
+# run 14: re-enable tbtt
+# loss .50
+
+# run 18: set seq_chop_len to 300
+# loss 1.4
+
+# run 18: set tbtt from 60 to 20
+# loss 1.4
+
+# run 20: turn tbptt off
+# loss 1.4
+
+# run 21: max_training_samples: 1->1000, max_validation_samples: 1->1000
+# loss 0.7
+# run 21: max_training_samples: 100000, max_validation_samples: 1->1000
+# loss -0.3
+# run 22: max_training_samples: 100000, max_validation_samples: 1->1000
+# loss -0.3
+
+# run 23: lr:.001->.003
+# loss -0.4
+
+# Run 24: rnn_hidden_size 200->900
+# loss -0.47
+
+# Run 25: epochs 40->120
+# loss -0.75
+# Run 30: disable tbtt false
+# loss -0.9
+# Run 40: sort by seq len and do chopping within a batch ("max_seq_len"-> 1000,
+#  "seq_chop_len"-> None,
+# loss -1.048   Beginning to overfit halfway 
 #%%
 
 import matplotlib.pyplot as pyplot
-from pathlib import Path
+nfrom pathlib import Path
 import math
 import random
 from pytorch_lightning.callbacks import Callback
@@ -17,16 +62,20 @@ hwdir = Path('/data') / 'neil' / 'hw'
 
 args = {
     # for model
-    'epochs':17,
+    'epochs':120,
     'batch_size': 400,
-    'lr': .001,
-    'optimizer': 'adam',
-    "rnn_hidden_size": 200,
-    "rnn_type": "gru",
-    "noise_variance": 0.1,
+    'lr': .003,
+    "rnn_hidden_size": 900,
+    "tbptt": 20,
+    "disable_tbptt": False,
+    "max_seq_len": 1000,
+    "seq_chop_len": None,
+    "max_training_samples": 100000,
+    "max_validation_samples": 1000,
+    'num_components': 1,
 
     # for generation
-    "generated_length": 100,
+    "generated_length": 150,
 }
 
 
@@ -139,15 +188,19 @@ from torch.utils.data import DataLoader
 import numpy as np
 
 class SeqDataset(Dataset):
-  def __init__(self, strokes, stats, chop_length=60):
+  def __init__(self, strokes, stats, chop_length=args['seq_chop_len']):
       """data is a numpy array containing different seq*3 arrays"""
       #print(f'SeqDataSet.__init__: data.shape: {data.shape}')
       self.stats = stats
       self.data = []
+      strokes = sorted(strokes, key=lambda a: a.shape[0])
       for stroke in strokes:
         stroke[:, 1:] = stroke[:, 1:] - self.stats['mean'] / self.stats['std']
-        for i in range(stroke.shape[0] // chop_length):
-            self.data.append(stroke[i*chop_length:(i+1)*chop_length])
+        if chop_length is not None:
+            for i in range(min(stroke.shape[0], args['max_seq_len']) // chop_length):
+                self.data.append(stroke[i*chop_length:(i+1)*chop_length])
+        else:
+            self.data.append(stroke[:args['max_seq_len']])
 
   def __len__(self):
     #print(f'SeqDataSet len(self.data)={len(self.data)} self.seq_length={self.seq_length}')
@@ -164,7 +217,7 @@ if True:
     strokes = np.load(datadir / 'strokes-py3.npy', allow_pickle=True)
     strokes[0].shape[0]
 
-    train_strokes = strokes[:1]
+    train_strokes = strokes[:5]
 
     def calc_stats(values):
         totals = None
@@ -177,14 +230,17 @@ if True:
     #print(f'stats: {stats}')
 
     train_ds = SeqDataset(train_strokes, stats)
+    print(f'length: {len(train_ds)}')
 
     first = train_ds[0][0]
     first[:,1:] = (first[:,1:] * stats['std']) + stats['mean']
-    prompt = first[:30,:]
-    last=first[30:,:]
+    prompt = first[:10,:]
+    last=first[10:,:]
     generated=np.copy(last)
     generated[:,1:] = generated[:,1:] + (np.random.rand(generated.shape[0], 2)-0.5)*3
     plot_stroke(generated, prompt=prompt, remainder=last)
+    for i in range(len(train_ds)):
+        print(i, train_ds[i][0].shape[0])
 
 #%%
 
@@ -198,7 +254,7 @@ class HWModel(pl.LightningModule):
     self.fc = nn.Linear(self.hidden_size, 5) 
 
     self.learning_rate = lr
-    self.bceWithLogitsLoss = torch.nn.BCEWithLogitsLoss()
+    self.bceWithLogitsLoss = torch.nn.BCEWithLogitsLoss(reduction='none')
     self.bs = bs
 
     # Return the hidden tensor(s) to pass to forward
@@ -230,47 +286,47 @@ class HWModel(pl.LightningModule):
   def xy_loss(self, yhat, y):
     mean = yhat[:,:,0:2]
     stddev = yhat[:,:,2:4]
+
+    #print(f'mean.shape: {mean.shape}, stddev.shape: {stddev.shape}, y.shape: {y.shape}')
     losses = ((mean - y)**2)/(2*stddev**2)  + torch.log(stddev)
-    return torch.mean(losses)
+    return losses
 
   def loss(self, y_hat, y):
       #print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
       #print(f'y_hat: [{y_hat[:,:20:]}, {y[:,:20,:]}')
       xy_loss = self.xy_loss(y_hat[:,:,1:], y[:,:,1:]) 
       bce_loss = self.bceWithLogitsLoss(y_hat[:,:,:1], y[:,:,:1])
-      #print(f'mse_loss: {mse_loss}, bce_loss = {bce_loss}')
-      return {
-              'total': xy_loss + bce_loss,
-              'xy': xy_loss,
-              'penup': bce_loss,
-      }
+      #print(f'xy_loss: {xy_loss}, bce_loss = {bce_loss}')
+      return xy_loss + bce_loss
 
   def training_step(self, batch, batch_idx, hiddens=None):
     data, y = batch
-    #print(f"data.shape {data.shape}")
-    #print(f"y.shape {y.shape}")
-    #print(f'training_step(data.shape={data.shape}, batch_idx={batch_idx}')
-    if hiddens is None:
-        hiddens = self.getNewHidden(batch_size=data.shape[0])
-    y_hat, hiddens = self(data, hiddens)
-      
-    #correct, total = self.char_accuracy(y_hat, y)
-    #print(f"training: beg of y_hat:{y_hat[0,:5,:].detach().cpu().numpy()}")
-    #print(f"training: beg of y:{y[0,:5,:].detach().cpu().numpy()}")
-
-    losses = self.loss(y_hat, y)
-    self.log('loss_train', losses, prog_bar=True)
-    if batch_idx == 0:
-        pass
-        #print(f'epoch: {self.current_epoch} batch: {batch_idx} training loss({y_hat}, {y})')
-        #if self.current_epoch == 0:
-            #print(f"saving original training image shape: {y[0].shape}")
-            #f = plot_stroke(y[0].cpu().numpy())
-            #self.logger.experiment.add_figure('original training image', f, self.current_epoch)
-    #self.log('train_accuracy', 100.*correct/total)
-
-    self.logger.experiment.add_scalars("losses", {"train_loss": losses["total"]})
-    return {'loss': losses['total']}
+    bs, seq_len, _ = data.shape
+    #print(f'batch: {bs}, {seq_len}')
+    seq_start = 0
+    tbptt = args['tbptt']
+    hiddens = self.getNewHidden(batch_size=data.shape[0])
+    sub_batches = 0
+    losses = []
+    while seq_start < seq_len:
+        sub_batch = (data[:,seq_start:seq_start + tbptt, :],
+                     y[:, seq_start:seq_start + tbptt, :])
+        #print(f'sub_batch: {(sub_batch[0].shape, sub_batch[1].shape)}')
+        
+        #print(f"data.shape {data.shape}")
+        #print(f"y.shape {y.shape}")
+        #print(f'training_step(data.shape={data.shape}, batch_idx={batch_idx}')
+        if args['disable_tbptt']:
+            hiddens = self.getNewHidden(batch_size=data.shape[0])
+        y_hat, hiddens = self(sub_batch[0], hiddens)
+        hiddens.detach()
+        losses.append(self.loss(y_hat, sub_batch[1]))
+        #print(f'loss: {loss}')
+        seq_start += tbptt
+        sub_batches += 1
+    loss = torch.mean(torch.cat(losses, dim=1))
+    self.log('loss_train', loss, prog_bar=True)
+    return loss
 
   def validation_step(self, batch, batch_idx):
     #print(f'validation_step (batch={batch}, batch_idx={batch_idx}')
@@ -278,35 +334,33 @@ class HWModel(pl.LightningModule):
     hidden = self.getNewHidden(batch_size=data.shape[0])
     y_hat, hidden = model(data, hidden)
     #c, t = self.char_accuracy(y_hat, y)
-    losses = self.loss(y_hat, y)
-    #self.log("loss_val", losses)
-    self.logger.experiment.add_scalars("losses", {"val_loss": losses["total"]})
+    loss = torch.mean(self.loss(y_hat, y))
+    self.log("loss_val", loss)
+    #self.logger.experiment.add_scalars("losses", {"val_loss": losses["total"]})
     #self.log('train_loss', losses, prog_bar=True)
     #self.log("val_accuracy", 100. * c / t)
-    if batch_idx == 0:
+    if batch_idx == 0 and (self.current_epoch % 2) == 0:
       prompt=self.train_ds[0][0][:30,:]
       remainder=self.train_ds[0][0][30:,:]
       sample = self.generate_unconditionally(prompt)
       #print(f'sample: {sample}')
       print(f'generated HW epoch: {self.current_epoch}')
-      f = plot_stroke(sample, prompt=prompt, remainder=remainder)
+      f = plot_stroke(sample, prompt=prompt, remainder=None)
       self.logger.experiment.add_figure('generated HW', f, self.current_epoch)
-      #self.logger.experiment.add_text('sample as tensor', str(sample.tolist()), self.current_epoch)
-    return {'loss': losses['total']}
+    return loss
 
 
 
-  def generate_unconditionally(self, prompt=None, output_length=args["generated_length"], noise_variance=args["noise_variance"],
+  def generate_unconditionally(self, prompt=None, output_length=args["generated_length"],
         verbose=False):
     hidden = self.getNewHidden(batch_size=1)
     output = torch.zeros((output_length+1, 3), device=self.device)
-    #print(f"noise: {noise}")
 
     def sample_from_prediction(prediction):
         #print(f'sample_from_prediction: {prediction}')
         result = torch.zeros((3))
         result[0] = 1 if  torch.sigmoid(prediction[0]) > random.random() else 0
-        # generate andom values with given means and standard devs  
+        # generate random values with given means and standard devs  
         result[1:] = torch.normal(prediction[1:3], prediction[3:5])
         return result
 
@@ -325,23 +379,20 @@ class HWModel(pl.LightningModule):
     for idx in range(output_length):
       with torch.no_grad():
         input = torch.reshape(output[idx], (1, 1, 3))
-        predictions, hidden = self.forward(torch.reshape(output[idx], (1, 1, 3)), hidden)
+        predictions, hidden = self.forward(input, hidden)
 
       # Only use the last prediction.
-      output[idx+1, :] = sample_from_prediction(predictions[0, -1, :])
+      output[idx+1] = sample_from_prediction(predictions[0, -1, :])
 
 
     if prompt is not None:
         #skip first (zero) element
         output = output[1:,:]
-    # convert to probabilities
     #output[:,0] = torch.sigmoid(output[:,0])
     asNumpy = output.cpu().numpy()
     # denormalize:
     asNumpy[:,1:] = asNumpy[:,1:] * self.stats['std'] + self.stats['mean']
 
-    # Sample whether penUp or penDown based on probability of penUp
-   # asNumpy[:, 0] = np.where(asNumpy[:, 0] > np.random.rand(asNumpy.shape[0]), 1, 0)
     return asNumpy
 
   def configure_optimizers(self):
@@ -359,17 +410,36 @@ class HWModel(pl.LightningModule):
       strokes = np.load(datadir / 'strokes-py3.npy', allow_pickle=True)
       self.strokes = strokes
 
+
+  @staticmethod
+  def dataloader_collate_fn(data):
+    data.sort(key=lambda x: len(x[0]), reverse=True)
+    xs = [d[0] for d in data]
+    ys = [d[1] for d in data]
+
+    # Must have same seq_len for each item in batch
+    # So, chop them off
+    # TODO(neil): Pad short, rather than cut long
+    chop_len = min([x.shape[0] for x in xs])
+    xs = [x[:chop_len] for x in xs]
+    ys = [y[:chop_len] for y in ys]
+    result = (torch.stack(xs, dim=0), torch.stack(ys, dim=0))
+    return result
+              
   def train_dataloader(self):
-      return DataLoader(self.train_ds, shuffle=False, batch_size=self.bs, num_workers=24)
+      return DataLoader(self.train_ds, shuffle=True, batch_size=self.bs, collate_fn=self.dataloader_collate_fn, num_workers=2)
 
   def val_dataloader(self):
-      return DataLoader(self.val_ds, shuffle=False, batch_size=self.bs, num_workers=24)
+      return DataLoader(self.val_ds, shuffle=False, batch_size=self.bs, collate_fn=self.dataloader_collate_fn, num_workers=2)
 
 
   def setup(self, stage = None):
-      train_split = int(len(self.strokes)*0.9)
-      valid_split = len(self.strokes) - train_split
-      train_strokes, valid_strokes = random_split(self.strokes, [train_split, valid_split])
+      train_split = int(len(self.strokes)*0.95)
+      #valid_split = len(self.strokes) - train_split
+      #train_strokes, valid_strokes = random_split(self.strokes, [train_split, valid_split])
+
+      train_strokes = self.strokes[:min(args['max_training_samples'], train_split)]
+      valid_strokes = self.strokes[train_split:train_split + args['max_validation_samples']]
 
       #train_strokes = self.strokes[:1]
       #valid_strokes = self.strokes[1:2]
@@ -407,14 +477,7 @@ class MyPrintingCallback(Callback):
         print(f'original training image')
         f = plot_stroke(asNumpy)
         #print(f"size of handwriting: {dl.dataset[0][0].numpy().shape}")
-        logger.experiment.add_figure('original training image', f, 0)
-
-        for noise_variance in [0.5, 0.1, 0.05, 0.01, 0.005, 0.001]: #
-          sample = pl_module.generate_unconditionally(noise_variance=noise_variance)
-          print(f'generated from untrained model (noise={noise_variance})')
-          f = plot_stroke(sample)
-          logger.experiment.add_figure(f'generate with untrained model (noise variance = {noise_variance})', f, 0)
-
+        #logger.experiment.add_figure('original training image', f, 0)
 
 trainer = pl.Trainer(
         max_epochs=args["epochs"],
