@@ -81,6 +81,9 @@
 # loss will now be on different scale
 # loss: 
 
+# Run 134: Do sampling MultivariateDistribution (with a single component)
+# loss: 
+
 #%%
 
 import matplotlib.pyplot as pyplot
@@ -366,7 +369,7 @@ class HWModel(pl.LightningModule):
         covariance[:, :, 0, 0] = stddev_oldway[:, :, 0] **2
         covariance[:, :, 1, 1] = stddev_oldway[:, :, 1] **2
         #print(f'covariance shape: {covariance.shape}')
-        mc = MultivariateNormal(mean_oldway, covariance, validate_args=True)
+        mc = self.construct_distribution(yhat)
         losses = mc.log_prob(y)
         #print(f'loss shape: {losses.shape}')
         return -losses
@@ -485,9 +488,15 @@ class HWModel(pl.LightningModule):
     def sample_from_prediction(prediction):
         nc = self.num_components
         #print(f'sample_from_prediction: {prediction}')
-        prediction = prediction.cpu()
         result = torch.zeros((3))
-        result[0] = 1 if  torch.sigmoid(prediction[0]) > random.random() else 0
+        mc = self.construct_distribution(prediction[:,:,1:])
+        #print(f'created mc')
+        result[1:] = mc.sample()       
+        prediction = prediction.cpu()
+        #print(f'sample_from_prediction: result[1:]={result[1:]}')
+        result[0] = 1 if  torch.sigmoid(prediction[0, 0, 0]) > random.random() else 0
+        return result
+
         means_old = prediction[1:3]
         stddev_old = prediction[1+2*nc:3+2*nc]
         # generate random values with given means and standard devs  
@@ -530,7 +539,7 @@ class HWModel(pl.LightningModule):
         predictions, hidden = self.forward(input, hidden)
         if verbose:
             print(f"predictions: {predictions}")
-        output[0] = sample_from_prediction(predictions[0, -1, :])
+        output[0] = sample_from_prediction(predictions[:, -1:, :])
 
     for idx in range(output_length):
       with torch.no_grad():
@@ -538,7 +547,7 @@ class HWModel(pl.LightningModule):
         predictions, hidden = self.forward(input, hidden)
 
       # Only use the last prediction.
-      output[idx+1] = sample_from_prediction(predictions[0, -1, :])
+      output[idx+1] = sample_from_prediction(predictions[:, -1:, :])
 
 
     if prompt is not None:
