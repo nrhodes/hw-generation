@@ -85,7 +85,36 @@
 # loss: .504
 
 # Run 141: Add correlation (with a single component)
-# loss: 
+# loss: .22
+
+# Run 144: Add slight perturbation to tbptt
+# loss: .47
+
+# Run 145: Add masking code (but without actually creating -1 penups)
+# loss: .4402
+
+# Run 157: Add actual masking: Create -1 penups for short sequences
+# loss: 4.2
+# Not good!
+
+# Run 158: Go back to shuffle=True for training dataloader and old truncate
+# collate_func
+# loss: .47
+
+# Run 158: Go back to shuffle=True for training dataloader and old truncate
+# collate_func
+# loss: .47
+
+# Run ??: Use MixtureSameFamily (with nc still == 1)
+# loss: .11
+
+# Run 165: Use MixtureSameFamily (with nc ==20)
+# loss: -0.16 (@ end: -0.38)
+
+# Run 166: Weight updown_loss by 3 (also increase batch size)
+# loss: -0.01
+
+# Run 167: increase epochs, increase batch size, 
 
 
 #%%
@@ -94,28 +123,27 @@ import matplotlib.pyplot as pyplot
 from pathlib import Path
 import random
 from pytorch_lightning.callbacks import Callback
-import math
 
 
 hwdir = Path('/data') / 'neil' / 'hw'
 
 args = {
     # for model
-    'epochs':60,
-    'batch_size': 400,
+    'epochs':200,
+    'batch_size': 512,
     'lr': .003,
     "rnn_hidden_size": 900,
     "tbptt": 20,
     "disable_tbptt": False,
+    "weight_updown_loss": 2.5,
     "max_seq_len": 1000,
     "seq_chop_len": None,
     "max_training_samples": 100000,
     "max_validation_samples": 1000,
-    'num_components': 1,
-    'force_to_1_component': False,
+    'num_components': 20,
 
     # for generation
-    "generated_length": 150,
+    "generated_length": 700,
 }
 
 
@@ -128,10 +156,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset
-from torchvision import datasets, transforms
-from torch.optim.lr_scheduler import StepLR
 import pytorch_lightning as pl
 from torch.distributions.multivariate_normal import MultivariateNormal
+import torch.distributions as D
+from torch.nn.utils.rnn import pad_sequence
 
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda")
@@ -141,9 +169,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 from torch.utils.data import Dataset
-from torch.utils.data import Sampler
 
 def plot_stroke(stroke, prompt=None, remainder=None, save_name=None):
     # Plot a single example.
@@ -189,7 +215,7 @@ def plot_stroke(stroke, prompt=None, remainder=None, save_name=None):
         if cut_value + 2 < len(y):
             #print('red', cut_value-1, cut_value+2)
             ax.plot(x[cut_value-1:cut_value+2], y[cut_value-1:cut_value+2],
-                    'r-', linewidth=2)
+                    'r-', linewidth=1)
         start = cut_value + 1
 
     # final stroke. Especially important if there were no penups specified
@@ -342,23 +368,28 @@ class HWModel(pl.LightningModule):
     nc = self.num_components
     bs, seq_len, _ = yhat.shape
     # takes all but the penup/down part of the yhat
-    mean = yhat[:,:,0:2]
-    stddev = yhat[:,:,2*nc:2*nc+2]
-    correlation = yhat[:,:,5*nc:5*nc+1]
-    covariance = torch.ones(bs, seq_len, 2, 2, device=self.device)
+    mean = yhat[:, :, 0*nc:2*nc]
+    mean=torch.reshape(mean, (bs, seq_len, nc, 2))
+    stddev = yhat[:, :, 2*nc:4*nc]
+    stddev=torch.reshape(stddev, (bs, seq_len, nc, 2))
+    weights = yhat[:, :, 4*nc:5*nc]
+    correlation = yhat[:, :, 5*nc:6*nc]
+    covariance = torch.ones(bs, seq_len, nc, 2, 2, device=self.device)
     #print(f'correlation shape: {correlation.shape}')
     #print(f'covariance shape: {covariance.shape}')
-    
-    minor_diagonal = stddev[:, :, 0] * stddev[:, :, 1] * correlation[:, :, 0]
+    minor_diagonal = stddev[:, :, :, 0] * stddev[:, :, :, 1] * correlation
     #print(f'minor_diagonal shape: {minor_diagonal.shape}')
     # Set major diagonal
-    covariance[:, :, 0, 0] = stddev[:, :, 0] **2
-    covariance[:, :, 1, 1] = stddev[:, :, 1] **2
+    covariance[:, :, :, 0, 0] = stddev[:, :, :, 0] **2
+    covariance[:, :, :, 1, 1] = stddev[:, :, :, 1] **2
      # Set minor diagonal
-    covariance[:, :, 1, 0] = minor_diagonal
-    covariance[:, :, 0, 1] = minor_diagonal
+    covariance[:, :, :, 1, 0] = minor_diagonal
+    covariance[:, :, :, 0, 1] = minor_diagonal
+    mix = D.Categorical(weights, validate_args=True)
+    comp = MultivariateNormal(mean, covariance, validate_args=True)
+    gmm = D.mixture_same_family.MixtureSameFamily(mix, comp, validate_args=True)
     #print(f'covariance shape: {covariance.shape}')
-    return MultivariateNormal(mean, covariance, validate_args=True)
+    return gmm
 
   def xy_loss(self, yhat, y, verbose=False):
     nc = self.num_components
@@ -366,62 +397,25 @@ class HWModel(pl.LightningModule):
     losses = mc.log_prob(y)
     #print(f'loss shape: {losses.shape}')
     return -losses
-    if verbose:
-        #print(f'yhat: {yhat.shape}')
-        print(f'y: {y.shape}')
-    mean = yhat[:,:,0*nc:2*nc]
-    stddev = yhat[:,:,2*nc:4*nc]
-    weights = yhat[:, :, 4*nc:5*nc] # shape batch X seq x nc
-    y_repeated = y.repeat([1, 1, nc])
-    weights_repeated = weights.repeat_interleave(repeats=2, dim=2)
-    if verbose:
-        #print(f'means: {meansy[0,0,0]}')
-        print(f'mean: {mean.shape}')
-        print(f'stddev: {stddev.shape}')
-        #print(f'stddevy: {stddevy.shape}')
-        #print(f'weights: {weights}')
-        print(f'y_repeated: {y_repeated[0,0,0]}')
-        print(f'weights_repeated: {weights_repeated.shape}')
-        #print(f'y_repeatedy: {y_repeatedy.shape}')
-    if True:
-        unweighted_losses = ((mean - y_repeated)**2)/(2*stddev**2)  + torch.log(stddev) # shape batch x seq x nc
-        losses = torch.sum(unweighted_losses * weights_repeated, dim=2)
-    else:
-        stddev_x = stddev[:, :, ::2]
-        stddev_y = stddev[:, :, 1::2]
-        z = ((mean[:, :, ::2] - y_repeated[:, :, ::2])**2)/(stddev_x**2) + (
-            ((mean[:, :, 1::2] - y_repeated[:, :, 1::2])**2)/(stddev_y**2))
-        if verbose:
-            print(f'Z shape: {z.shape}')
-        n = (1/2*math.pi*stddev_x*stddev_y)*torch.exp(-z/2)
-        weighted_n = torch.sum(n * weights, dim=2)
-        losses = -torch.log(weighted_n)
 
-    if verbose:
-        print(f'  unweighted_losses: {unweighted_losses.shape}')
-    if verbose:
-        print(f'losses: {losses.shape}')
-    if False and (nc == 1 or args['force_to_1_component']) and not torch.equal(losses_oldway, losses):
-        #print('xy_loss: old/new way not equal')
-        print(f'not equal, m losses_oldway.shape: {losses_oldway.shape}')
-        print(f'not equal, losses.shape: {losses.shape}')
-        print(f'not equal, m losses_oldway: {losses_oldway[0, 0]}')
-        print(f'not equal,          losses: {losses[0, 0]}')
-        1/0
-    return losses
 
   def loss(self, y_hat, y):
-      #print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
-      #print(f'y_hat: [{y_hat[:,:20:]}, {y[:,:20,:]}')
-      xy_loss = self.xy_loss(y_hat[:,:,1:], y[:,:,1:]) 
-      bce_loss = self.bceWithLogitsLoss(y_hat[:,:,0], y[:,:,0])
-      #print(f'xy_loss: {xy_loss.shape}, bce_loss = {bce_loss.shape}')
-      result = xy_loss + bce_loss
-      #print(f'xy_loss: result: {result.shape}')
-      return result
+    #print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
+    #print(f'y_hat: [{y_hat[:,:20:]}, {y[:,:20,:]}')
+    xy_loss = self.xy_loss(y_hat[:,:,1:], y[:,:,1:]) 
+    bce_loss = self.bceWithLogitsLoss(y_hat[:,:,0], y[:,:,0])
+    #print(f'xy_loss: {xy_loss.shape}, bce_loss = {bce_loss.shape}')
+    result = xy_loss + args['weight_updown_loss']*bce_loss
+    #print(f'xy_loss: result: {result.shape}')
+    return result
 
   def training_step(self, batch, batch_idx, hiddens=None):
     data, y = batch
+
+    # mask out values where the penup < 0 (padded values are -1)
+    # mask will be of shape (bs, seq_len)
+    mask = torch.where(y[:,:,0] < 0, 0.0, 1.0)
+    
     bs, seq_len, _ = data.shape
     #print(f'batch: {bs}, {seq_len}')
     seq_start = 0
@@ -430,8 +424,10 @@ class HWModel(pl.LightningModule):
     sub_batches = 0
     losses = []
     while seq_start < seq_len:
-        sub_batch = (data[:,seq_start:seq_start + tbptt, :],
-                     y[:, seq_start:seq_start + tbptt, :])
+        # Use random perturbation of tbptt
+        tbptt_to_use = tbptt + random.choice([0, 1, 2])
+        sub_batch = (data[:, seq_start:seq_start + tbptt_to_use, :],
+                     y[:, seq_start:seq_start + tbptt_to_use, :])
         #print(f'sub_batch: {(sub_batch[0].shape, sub_batch[1].shape)}')
         
         #print(f"data.shape {data.shape}")
@@ -443,11 +439,13 @@ class HWModel(pl.LightningModule):
         hiddens.detach()
         losses.append(self.loss(y_hat, sub_batch[1]))
         #print(f'loss: {loss}')
-        seq_start += tbptt
+        seq_start += tbptt_to_use
         sub_batches += 1
-    loss = torch.mean(torch.cat(losses, dim=1))
-    self.log('loss_train', loss, prog_bar=True)
-    return loss
+    unmasked_losses = torch.cat(losses, dim=1)
+    masked_losses = unmasked_losses * mask
+    avg_loss = torch.sum(masked_losses) / torch.sum(mask)
+    self.log('loss_train', avg_loss, prog_bar=True)
+    return avg_loss
 
   def validation_step(self, batch, batch_idx):
     #print(f'validation_step (batch={batch}, batch_idx={batch_idx}')
@@ -466,7 +464,7 @@ class HWModel(pl.LightningModule):
       sample = self.generate_unconditionally(prompt)
       #print(f'sample: {sample}')
       print(f'generated HW epoch: {self.current_epoch}')
-      f = plot_stroke(sample, prompt=prompt, remainder=None)
+      f = plot_stroke(sample, prompt=None, remainder=None)
       self.logger.experiment.add_figure('generated HW', f, self.current_epoch)
     return loss
 
@@ -488,39 +486,6 @@ class HWModel(pl.LightningModule):
         prediction = prediction.cpu()
         #print(f'sample_from_prediction: result[1:]={result[1:]}')
         result[0] = 1 if  torch.sigmoid(prediction[0, 0, 0]) > random.random() else 0
-        return result
-
-        means_old = prediction[1:3]
-        stddev_old = prediction[1+2*nc:3+2*nc]
-        # generate random values with given means and standard devs  
-        #print(f'sample_from_prediction: prediction: {prediction}')
-        means = prediction[1+0*nc:1+2*nc]
-        stddev = prediction[1+2*nc:1+4*nc]
-
-        if (nc == 1 or args['force_to_1_component']) and not torch.equal(means_old, means[:2]):
-            print('sample_from_prediction: old/new means not equal')
-            print(f'means: {means.shape}')
-            print(f'means_old: {means_old.shape}')
-            1/0
-        if (nc == 1 or args['force_to_1_component']) and not torch.equal(stddev_old, stddev[:2]):
-            print('sample_from_prediction: old/new means not equal')
-            1/0
-        #print(f'1: means: {means}, stddev: {stddev}')
-        unweighted_xys = torch.normal(means, stddev)
-        #print(f'unweighted_xys: {unweighted_xys}')
-        #print(f'sample_from_prediction: means: {means}')
-        #print(f'sample_from_prediction: stddev: {stddev}')
-        #print(f'sample_from_prediction: unweighted_xys: {unweighted_xys}')
-        weights = prediction[1+4*nc:1+5*nc]
-        #print(f'sample_from_prediction: weights: {weights}')
-        result[1] = torch.sum(unweighted_xys[::2]*weights)
-        result[2] = torch.sum(unweighted_xys[1::2]*weights)
-        if (nc == 1 or args['force_to_1_component']) and not torch.equal(result[1:], unweighted_xys[:2]):
-            print('sample_from_prediction: old/new weighting not equal')
-            1/0
-
-        #print(f'result[1:]: {result[1:]}')
-        #print(f'sample_from_prediction: result: {result}')
         return result
 
     if prompt is not None:
@@ -582,7 +547,11 @@ class HWModel(pl.LightningModule):
     xs = [x[:chop_len] for x in xs]
     ys = [y[:chop_len] for y in ys]
     result = (torch.stack(xs, dim=0), torch.stack(ys, dim=0))
-    return result
+    return result   
+    #print(f'collate_fn: {xs[0].shape[0]}..{xs[-1].shape[0]}')
+
+    return (pad_sequence(xs, batch_first=True, padding_value=-1),
+            pad_sequence(ys, batch_first=True, padding_value=-1))
               
   def train_dataloader(self):
       return DataLoader(self.train_ds, shuffle=True, batch_size=self.bs, collate_fn=self.dataloader_collate_fn, num_workers=1)
@@ -641,7 +610,7 @@ trainer = pl.Trainer(
     max_epochs=args["epochs"],
     num_sanity_val_steps=0,
     accelerator='gpu',
-    devices=1,
+    devices=[1],
     logger=logger,
     log_every_n_steps=1,
     callbacks=[MyPrintingCallback()],
