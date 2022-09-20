@@ -115,7 +115,9 @@
 # loss: -0.01
 
 # Run 167: increase epochs, increase batch size, 
+# Loss: -.1094
 
+# Run 172: samples every 5 epochs, no prompt, generated_length: 700->400
 
 #%%
 
@@ -141,9 +143,10 @@ args = {
     "max_training_samples": 100000,
     "max_validation_samples": 1000,
     'num_components': 20,
+    'sample_every_k_epochs': 5,
 
     # for generation
-    "generated_length": 700,
+    "generated_length": 400,
 }
 
 
@@ -458,10 +461,10 @@ class HWModel(pl.LightningModule):
     #self.logger.experiment.add_scalars("losses", {"val_loss": losses["total"]})
     #self.log('train_loss', losses, prog_bar=True)
     #self.log("val_accuracy", 100. * c / t)
-    if batch_idx == 0 and (self.current_epoch % 2) == 0:
+    if batch_idx == 0 and (self.current_epoch % args['sample_every_k_epochs']) == 0:
       prompt=self.train_ds[0][0][:30,:]
       remainder=self.train_ds[0][0][30:,:]
-      sample = self.generate_unconditionally(prompt)
+      sample = self.generate_unconditionally(prompt=None)
       #print(f'sample: {sample}')
       print(f'generated HW epoch: {self.current_epoch}')
       f = plot_stroke(sample, prompt=None, remainder=None)
@@ -610,7 +613,7 @@ trainer = pl.Trainer(
     max_epochs=args["epochs"],
     num_sanity_val_steps=0,
     accelerator='gpu',
-    devices=[1],
+    devices=[2],
     logger=logger,
     log_every_n_steps=1,
     callbacks=[MyPrintingCallback()],
