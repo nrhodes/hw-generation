@@ -118,7 +118,15 @@
 # Loss: -.1094
 
 # Run 172: samples every 5 epochs, no prompt, generated_length: 700->400
+# After 100 epochs: loss: -0.05
 
+# unconditional
+# Run 388: batch:size 768: epochs: 100
+# loss: -0.05
+
+# Unconditional, but made forward through RNN one step at a time
+# Run 393
+# Loss: -0.05
 #%%
 
 import matplotlib.pyplot as pyplot
@@ -131,8 +139,8 @@ hwdir = Path('/data') / 'neil' / 'hw'
 
 args = {
     # for model
-    'epochs':200,
-    'batch_size': 512,
+    'epochs':100,
+    'batch_size': 768,
     'lr': .003,
     "rnn_hidden_size": 900,
     "tbptt": 20,
@@ -330,24 +338,25 @@ class HWModel(pl.LightningModule):
 
     # Return the hidden tensor(s) to pass to forward
   def getNewHidden(self, batch_size):
-    if False:
-        # LSTM
-        return (torch.zeros(1, batch_size, self.hidden_size, device=self.device),
-               torch.zeros(1, batch_size, self.hidden_size,device=self.device))
-    else:
-        return torch.zeros(1, batch_size, self.hidden_size, device=self.device)
+    return torch.zeros(1, batch_size, self.hidden_size, device=self.device)
 
   def forward(self, x, hidden):
     VERBOSE=False
     if VERBOSE:
         print(f'Forward: input: {x}, hidden: {hidden}')
 
-    (x, hidden) = self.rnn(x, hidden)
+    bs, seq_len, _ = x.shape
+    xs = torch.zeros((bs, seq_len, self.hidden_size), device=self.device)
+
+    for seq_idx in range(seq_len):
+        xsmall = x[:,seq_idx:seq_idx+1, :]
+        (xsmall, hidden) = self.rnn(xsmall, hidden)
+        xs[:, seq_idx:seq_idx+1, :] = xsmall
 
     if VERBOSE:
       print(f'Forward: size after rnn: {x.size()}')
       print(f'Forward: after rnn: {x} ')
-    x = self.fc(x)
+    x = self.fc(xs)
     if VERBOSE:
       print(f'Forward: size after fc: {x.size()}')
       print(f'Forward:  after fc: {x}')
