@@ -127,6 +127,10 @@
 # Unconditional, but made forward through RNN one step at a time
 # Run 393
 # Loss: -0.05
+
+# Add HWPairsDataset, but don't use
+# Run 394
+# Loss: 
 #%%
 
 import matplotlib.pyplot as pyplot
@@ -288,6 +292,68 @@ class SeqDataset(Dataset):
     return t[:-1], t[1:]
 
 #%%
+CHARS="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ "
+#CHARS="abcdefghijklmnop "
+#CHARS="abc "
+
+class HWPairsDataset(Dataset):
+
+  def __init__(self, strokes, texts, stats):
+      """data is a numpy array containing different seq*3 arrays"""
+      self.stats = stats
+      self.setup_texts(texts)
+      self.setup_strokes(strokes)
+      strokes_texts = sorted(zip(strokes, texts), key=lambda a: a[0].shape[0])
+      strokes = [s for s, _ in strokes_texts]
+      texts = [t for _, t in strokes_texts]
+
+  @staticmethod
+  def ord_value(c):
+    index = CHARS.find(c)
+    if index >=0:
+        return index
+    else:
+        return len(CHARS)
+
+  @staticmethod
+  def char_value(i):
+    if i < len(CHARS):
+        return CHARS[i]
+    else:
+        return "?"
+
+  @staticmethod
+  def to_onehot(text):
+    ords = [HWPairsDataset.ord_value(c) for c in text]
+    return F.one_hot(torch.tensor(ords), num_classes=len(CHARS)+1)
+  
+  @staticmethod
+  def from_onehot(onehot):
+    chars = []
+    classes = torch.argmax(onehot, dim=1)
+    for i in range(classes.shape[0]):
+        chars.append(HWPairsDataset.char_value(classes[i]))
+    return "".join(chars)
+
+  def setup_strokes(self, strokes):
+    self.strokes = []
+    for stroke in strokes:
+      stroke[:, 1:] = stroke[:, 1:] - self.stats['mean'] / self.stats['std']
+      self.strokes.append(stroke[:args['max_seq_len']])
+
+  def setup_texts(self, texts):
+    self.texts = []
+    for text in texts:
+      self.texts.append(self.to_onehot(text))
+
+  def __len__(self):
+    return len(self.strokes)
+
+  def __getitem__(self, idx):
+    t = torch.as_tensor(self.strokes[idx])
+    return t[:-1], self.texts[idx], t[1:]
+
+#%%
 3+4
 if True:
     datadir = hwdir / 'data'
@@ -422,7 +488,7 @@ class HWModel(pl.LightningModule):
     return result
 
   def training_step(self, batch, batch_idx, hiddens=None):
-    data, y = batch
+    data, text, y = batch
 
     # mask out values where the penup < 0 (padded values are -1)
     # mask will be of shape (bs, seq_len)
@@ -461,7 +527,7 @@ class HWModel(pl.LightningModule):
 
   def validation_step(self, batch, batch_idx):
     #print(f'validation_step (batch={batch}, batch_idx={batch_idx}')
-    data, y = batch
+    data, text, y = batch
     hidden = self.getNewHidden(batch_size=data.shape[0])
     y_hat, hidden = model(data, hidden)
     #c, t = self.char_accuracy(y_hat, y)
@@ -544,26 +610,34 @@ class HWModel(pl.LightningModule):
       datadir = hwdir / 'data'
       strokes = np.load(datadir / 'strokes-py3.npy', allow_pickle=True)
       self.strokes = strokes
+      with (datadir / 'sentences.txt').open() as f:
+          texts = f.readlines()
+      self.texts = [t.strip() for t in texts]
 
 
   @staticmethod
   def dataloader_collate_fn(data):
     data.sort(key=lambda x: len(x[0]), reverse=True)
     xs = [d[0] for d in data]
-    ys = [d[1] for d in data]
+    ts = [d[1] for d in data]
+    ys = [d[2] for d in data]
 
     # Must have same seq_len for each item in batch
     # So, chop them off
-    # TODO(neil): Pad short, rather than cut long
     chop_len = min([x.shape[0] for x in xs])
+    chop_len_t = min([t.shape[0] for t in ts])
     xs = [x[:chop_len] for x in xs]
+    ts = [t[:chop_len_t] for t in ts]
     ys = [y[:chop_len] for y in ys]
-    result = (torch.stack(xs, dim=0), torch.stack(ys, dim=0))
+    result = (torch.stack(xs, dim=0), torch.stack(ts, dim=0), torch.stack(ys, dim=0))
+    (xresult, tresult, yresult) = result
+    if xresult.isnan().any():
+        print('dataloader_collate_fn: xresult nan: {xresult}')
+    if tresult.isnan().any():
+        print('dataloader_collate_fn: tresult nan: {tresult}')
+    if yresult.isnan().any():
+        print('dataloader_collate_fn: yresult nan: {yresult}')
     return result   
-    #print(f'collate_fn: {xs[0].shape[0]}..{xs[-1].shape[0]}')
-
-    return (pad_sequence(xs, batch_first=True, padding_value=-1),
-            pad_sequence(ys, batch_first=True, padding_value=-1))
               
   def train_dataloader(self):
       return DataLoader(self.train_ds, shuffle=True, batch_size=self.bs, collate_fn=self.dataloader_collate_fn, num_workers=1)
@@ -572,6 +646,17 @@ class HWModel(pl.LightningModule):
       return DataLoader(self.val_ds, shuffle=False, batch_size=self.bs, collate_fn=self.dataloader_collate_fn, num_workers=1)
 
 
+  def setup_strokes(self, strokes):
+    self.strokes = []
+    for stroke in strokes:
+      stroke[:, 1:] = stroke[:, 1:] - self.stats['mean'] / self.stats['std']
+      self.strokes.append(stroke[:args['max_seq_len']])
+
+  def setup_texts(self, texts):
+    self.texts = []
+    for text in texts:
+      self.texts.append(self.to_onehot(text))
+
   def setup(self, stage = None):
       train_split = int(len(self.strokes)*0.95)
       #valid_split = len(self.strokes) - train_split
@@ -579,6 +664,8 @@ class HWModel(pl.LightningModule):
 
       train_strokes = self.strokes[:min(args['max_training_samples'], train_split)]
       valid_strokes = self.strokes[train_split:train_split + args['max_validation_samples']]
+      train_texts = self.texts[:min(args['max_training_samples'], train_split)]
+      valid_texts = self.texts[train_split:train_split + args['max_validation_samples']]
 
       #train_strokes = self.strokes[:1]
       #valid_strokes = self.strokes[1:2]
@@ -592,8 +679,8 @@ class HWModel(pl.LightningModule):
       self.stats = calc_stats(train_strokes)
       print(f'stats: {self.stats}')
 
-      self.train_ds = SeqDataset(train_strokes, self.stats)
-      self.val_ds = SeqDataset(valid_strokes, self.stats)
+      self.train_ds = HWPairsDataset(train_strokes, train_texts, self.stats)
+      self.val_ds = HWPairsDataset(valid_strokes, valid_texts, self.stats)
       print(f'HWDataModule: len(train_ds) = {len(self.train_ds)}, len(val_ds)={len(self.val_ds)}')
 
 
