@@ -126,11 +126,29 @@
 
 # Unconditional, but made forward through RNN one step at a time
 # Run 393
-# Loss: -0.05
+# Loss: -0.07
 
 # Add HWPairsDataset, but don't use
 # Run 394
-# Loss: 
+# Loss: 0.03
+
+# Run again, because loss was higher than previously. Less this time. Seems OK.
+# Run 397:
+# Loss: -0.4
+
+# Add input (zeros) to RNN and extra output from FC (ignored).
+# Run 402:  Got covariance problem
+# Loss: -0.4
+
+# Add input (zeros) to RNN and extra output from FC (ignored).
+# Run 404:  Higher loss (due to extra unused input?)
+# Loss: 0.3
+
+# Run 405: 300 epochs: batch size 768
+# loss @ same epochs as 404: -.01
+# loss after 300 epochs: -0.55
+
+
 #%%
 
 import matplotlib.pyplot as pyplot
@@ -143,7 +161,7 @@ hwdir = Path('/data') / 'neil' / 'hw'
 
 args = {
     # for model
-    'epochs':100,
+    'epochs':300,
     'batch_size': 768,
     'lr': .003,
     "rnn_hidden_size": 900,
@@ -156,6 +174,7 @@ args = {
     "max_validation_samples": 1000,
     'num_components': 20,
     'sample_every_k_epochs': 5,
+    'K': 1,
 
     # for generation
     "generated_length": 400,
@@ -355,7 +374,7 @@ class HWPairsDataset(Dataset):
 
 #%%
 3+4
-if True:
+if False:
     datadir = hwdir / 'data'
     strokes = np.load(datadir / 'strokes-py3.npy', allow_pickle=True)
     strokes[0].shape[0]
@@ -391,12 +410,14 @@ import string
 
 class HWModel(pl.LightningModule):
   def __init__(self, lr=args['lr'], bs = args['batch_size'],
+        K = args['K'],
         num_components=args['num_components']):
     super().__init__()
     self.hidden_size = args["rnn_hidden_size"]
-    self.rnn = nn.GRU(input_size=3, hidden_size=self.hidden_size, batch_first=True)
-    self.fc = nn.Linear(self.hidden_size, 1+6*num_components) 
+    self.rnn = nn.GRU(input_size=3+len(CHARS)+1, hidden_size=self.hidden_size, batch_first=True)
+    self.fc = nn.Linear(self.hidden_size, 1+6*num_components+K*3) 
     self.num_components = num_components
+    self.K = K
 
     self.learning_rate = lr
     self.bceWithLogitsLoss = torch.nn.BCEWithLogitsLoss(reduction='none')
@@ -414,9 +435,10 @@ class HWModel(pl.LightningModule):
     bs, seq_len, _ = x.shape
     xs = torch.zeros((bs, seq_len, self.hidden_size), device=self.device)
 
+    wzero = torch.zeros((bs, 1, len(CHARS)+1), device=self.device)
     for seq_idx in range(seq_len):
         xsmall = x[:,seq_idx:seq_idx+1, :]
-        (xsmall, hidden) = self.rnn(xsmall, hidden)
+        (xsmall, hidden) = self.rnn(torch.cat((xsmall, wzero), dim=2), hidden)
         xs[:, seq_idx:seq_idx+1, :] = xsmall
 
     if VERBOSE:
@@ -464,8 +486,11 @@ class HWModel(pl.LightningModule):
     covariance[:, :, :, 1, 0] = minor_diagonal
     covariance[:, :, :, 0, 1] = minor_diagonal
     mix = D.Categorical(weights, validate_args=True)
-    comp = MultivariateNormal(mean, covariance, validate_args=True)
-    gmm = D.mixture_same_family.MixtureSameFamily(mix, comp, validate_args=True)
+    try:
+        comp = MultivariateNormal(mean, covariance, validate_args=True)
+        gmm = D.mixture_same_family.MixtureSameFamily(mix, comp, validate_args=True)
+    except ValueError as err:
+        print(f'construct_distribution: invalid covariance matrix: {covariance} ', exc_info=e)
     #print(f'covariance shape: {covariance.shape}')
     return gmm
 
@@ -709,7 +734,7 @@ trainer = pl.Trainer(
     max_epochs=args["epochs"],
     num_sanity_val_steps=0,
     accelerator='gpu',
-    devices=[2],
+    devices=[1],
     logger=logger,
     log_every_n_steps=1,
     callbacks=[MyPrintingCallback()],
