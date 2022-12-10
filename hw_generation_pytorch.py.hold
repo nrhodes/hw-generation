@@ -69,115 +69,38 @@
 # Should act like only have 1 component.
 # Isn't acting that way. Is following path of Run 58!
 
-# Run 99: Set args['force_to_1_component'] to True. In loss function, calculate
+# Run 60: Set args['force_to_1_component'] to True. In loss function, calculate
 # old and new way.
-# loss now is -1.697 (may not be comparable since xy_loss now returns bs X seq_len tensor
-# rather than bs X seq_len X 2). However, generated samples look good.
-
-# Run 108: Set args['force_to_1_component'] to False (now have 5 components)
-# loss: .01 (big spike at the end)
-
-# Run 123: Compute loss using MultivariateDistribution (with a single component)
-# loss will now be on different scale
-# loss: .5095
-
-# Run 134: Do sampling MultivariateDistribution (with a single component)
-# loss: .504
-
-# Run 141: Add correlation (with a single component)
-# loss: .22
-
-# Run 144: Add slight perturbation to tbptt
-# loss: .47
-
-# Run 145: Add masking code (but without actually creating -1 penups)
-# loss: .4402
-
-# Run 157: Add actual masking: Create -1 penups for short sequences
-# loss: 4.2
-# Not good!
-
-# Run 158: Go back to shuffle=True for training dataloader and old truncate
-# collate_func
-# loss: .47
-
-# Run 158: Go back to shuffle=True for training dataloader and old truncate
-# collate_func
-# loss: .47
-
-# Run ??: Use MixtureSameFamily (with nc still == 1)
-# loss: .11
-
-# Run 165: Use MixtureSameFamily (with nc ==20)
-# loss: -0.16 (@ end: -0.38)
-
-# Run 166: Weight updown_loss by 3 (also increase batch size)
-# loss: -0.01
-
-# Run 167: increase epochs, increase batch size, 
-# Loss: -.1094
-
-# Run 172: samples every 5 epochs, no prompt, generated_length: 700->400
-# After 100 epochs: loss: -0.05
-
-# unconditional
-# Run 388: batch:size 768: epochs: 100
-# loss: -0.05
-
-# Unconditional, but made forward through RNN one step at a time
-# Run 393
-# Loss: -0.07
-
-# Add HWPairsDataset, but don't use
-# Run 394
-# Loss: 0.03
-
-# Run again, because loss was higher than previously. Less this time. Seems OK.
-# Run 397:
-# Loss: -0.4
-
-# Add input (zeros) to RNN and extra output from FC (ignored).
-# Run 402:  Got covariance problem
-# Loss: -0.4
-
-# Add input (zeros) to RNN and extra output from FC (ignored).
-# Run 404:  Higher loss (due to extra unused input?)
-# Loss: 0.3
-
-# Run 405: 300 epochs: batch size 768
-# loss @ same epochs as 404: -.01
-# loss after 300 epochs: -0.55
-
 
 #%%
 
 import matplotlib.pyplot as pyplot
 from pathlib import Path
+import math
 import random
 from pytorch_lightning.callbacks import Callback
+
 
 
 hwdir = Path('/data') / 'neil' / 'hw'
 
 args = {
     # for model
-    'epochs':600,
-    'batch_size': 768,
+    'epochs':60,
+    'batch_size': 2,  #400
     'lr': .003,
     "rnn_hidden_size": 900,
-    "tbptt": 20,
+    "tbptt": 5,
     "disable_tbptt": False,
-    "weight_updown_loss": 2.5,
     "max_seq_len": 1000,
     "seq_chop_len": None,
     "max_training_samples": 100000,
     "max_validation_samples": 1000,
-    'num_components': 20,
-    'sample_every_k_epochs': 5,
-    'K': 1,
+    'num_components': 5,
+    'force_to_1_component': True,
 
     # for generation
-    "generated_length": 400,
+    "generated_length": 150,
 }
 
 
@@ -190,11 +113,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset
+from torchvision import datasets, transforms
+from torch.optim.lr_scheduler import StepLR
 import pytorch_lightning as pl
-from torch.distributions.multivariate_normal import MultivariateNormal
-import torch.distributions as D
-from torch.nn.utils.rnn import pad_sequence
 
+#torch.manual_seed(args["seed"])
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda")
 
@@ -203,7 +126,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 from torch.utils.data import Dataset
+from torch.utils.data import Sampler
 
 def plot_stroke(stroke, prompt=None, remainder=None, save_name=None):
     # Plot a single example.
@@ -249,7 +174,7 @@ def plot_stroke(stroke, prompt=None, remainder=None, save_name=None):
         if cut_value + 2 < len(y):
             #print('red', cut_value-1, cut_value+2)
             ax.plot(x[cut_value-1:cut_value+2], y[cut_value-1:cut_value+2],
-                    'r-', linewidth=1)
+                    'r-', linewidth=2)
         start = cut_value + 1
 
     # final stroke. Especially important if there were no penups specified
@@ -311,70 +236,8 @@ class SeqDataset(Dataset):
     return t[:-1], t[1:]
 
 #%%
-CHARS="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ "
-#CHARS="abcdefghijklmnop "
-#CHARS="abc "
-
-class HWPairsDataset(Dataset):
-
-  def __init__(self, strokes, texts, stats):
-      """data is a numpy array containing different seq*3 arrays"""
-      self.stats = stats
-      self.setup_texts(texts)
-      self.setup_strokes(strokes)
-      strokes_texts = sorted(zip(strokes, texts), key=lambda a: a[0].shape[0])
-      strokes = [s for s, _ in strokes_texts]
-      texts = [t for _, t in strokes_texts]
-
-  @staticmethod
-  def ord_value(c):
-    index = CHARS.find(c)
-    if index >=0:
-        return index
-    else:
-        return len(CHARS)
-
-  @staticmethod
-  def char_value(i):
-    if i < len(CHARS):
-        return CHARS[i]
-    else:
-        return "?"
-
-  @staticmethod
-  def to_onehot(text):
-    ords = [HWPairsDataset.ord_value(c) for c in text]
-    return F.one_hot(torch.tensor(ords), num_classes=len(CHARS)+1)
-  
-  @staticmethod
-  def from_onehot(onehot):
-    chars = []
-    classes = torch.argmax(onehot, dim=1)
-    for i in range(classes.shape[0]):
-        chars.append(HWPairsDataset.char_value(classes[i]))
-    return "".join(chars)
-
-  def setup_strokes(self, strokes):
-    self.strokes = []
-    for stroke in strokes:
-      stroke[:, 1:] = stroke[:, 1:] - self.stats['mean'] / self.stats['std']
-      self.strokes.append(stroke[:args['max_seq_len']])
-
-  def setup_texts(self, texts):
-    self.texts = []
-    for text in texts:
-      self.texts.append(self.to_onehot(text))
-
-  def __len__(self):
-    return len(self.strokes)
-
-  def __getitem__(self, idx):
-    t = torch.as_tensor(self.strokes[idx])
-    return t[:-1], self.texts[idx], t[1:]
-
-#%%
 3+4
-if False:
+if True:
     datadir = hwdir / 'data'
     strokes = np.load(datadir / 'strokes-py3.npy', allow_pickle=True)
     strokes[0].shape[0]
@@ -410,14 +273,12 @@ import string
 
 class HWModel(pl.LightningModule):
   def __init__(self, lr=args['lr'], bs = args['batch_size'],
-        K = args['K'],
         num_components=args['num_components']):
     super().__init__()
     self.hidden_size = args["rnn_hidden_size"]
-    self.rnn = nn.GRU(input_size=3+len(CHARS)+1, hidden_size=self.hidden_size, batch_first=True)
-    self.fc = nn.Linear(self.hidden_size, 1+6*num_components+K*3) 
+    self.rnn = nn.GRU(input_size=3, hidden_size=self.hidden_size, batch_first=True)
+    self.fc = nn.Linear(self.hidden_size, 1+5*num_components) 
     self.num_components = num_components
-    self.K = K
 
     self.learning_rate = lr
     self.bceWithLogitsLoss = torch.nn.BCEWithLogitsLoss(reduction='none')
@@ -425,26 +286,24 @@ class HWModel(pl.LightningModule):
 
     # Return the hidden tensor(s) to pass to forward
   def getNewHidden(self, batch_size):
-    return torch.zeros(1, batch_size, self.hidden_size, device=self.device)
+    if False:
+        # LSTM
+        return (torch.zeros(1, batch_size, self.hidden_size, device=self.device),
+               torch.zeros(1, batch_size, self.hidden_size,device=self.device))
+    else:
+        return torch.zeros(1, batch_size, self.hidden_size, device=self.device)
 
   def forward(self, x, hidden):
     VERBOSE=False
     if VERBOSE:
         print(f'Forward: input: {x}, hidden: {hidden}')
 
-    bs, seq_len, _ = x.shape
-    xs = torch.zeros((bs, seq_len, self.hidden_size), device=self.device)
-
-    wzero = torch.zeros((bs, 1, len(CHARS)+1), device=self.device)
-    for seq_idx in range(seq_len):
-        xsmall = x[:,seq_idx:seq_idx+1, :]
-        (xsmall, hidden) = self.rnn(torch.cat((xsmall, wzero), dim=2), hidden)
-        xs[:, seq_idx:seq_idx+1, :] = xsmall
+    (x, hidden) = self.rnn(x, hidden)
 
     if VERBOSE:
       print(f'Forward: size after rnn: {x.size()}')
       print(f'Forward: after rnn: {x} ')
-    x = self.fc(xs)
+    x = self.fc(x)
     if VERBOSE:
       print(f'Forward: size after fc: {x.size()}')
       print(f'Forward:  after fc: {x}')
@@ -452,73 +311,83 @@ class HWModel(pl.LightningModule):
     # Order of output is:
     # 0: penup/down
     # [1:1+num_components]: mean-x
-    # [1+num_componennts:1+2*num_components]: mean-y
-    # [1+2*num_components: 1+3_num_components: std-x
-    # [1+3_num_components: 1+4_num_components: std-y
-    # [1+3_num_components: 1+4_num_components: correlation
-    # [1+4_num_components: 1+5_num_components: weighting factor
+    # [1+num_components:1+2*num_components]: mean-y
+    # [1+2*num_componets: 1+3_num_components: std-x
+    # [1+3_num_componets: 1+4_num_components: std-y
+    # [1+4_num_componets: 1+5_num_components: weighting factor
     x_new = x.clone()
     x_new[:,:, 1+2*nc:1+4*nc] = torch.exp(x[:,:, 1+2*nc:1+4*nc])   # convert to non-negative std dev
     x_new[:,:, 1+4*nc:1+5*nc] = F.softmax(x[:,:, 1+4*nc:1+5*nc], dim=2)   # convert to %
-    x_new[:,:, 1+5*nc:1+6*nc] = torch.tanh(x[:,:, 1+5*nc:1+6*nc])   # convert to range (-1, 1)
     
+    if args['force_to_1_component']:
+        x_new[:,:,1+4*nc:1+5*nc] = 0.0
+        x_new[:,:,1+4*nc] = 1.0
+    if nc == 1:
+        x_new2 = x.clone()
+        x_new2[:,:,3:] = torch.exp(x[:,:,3:])   # convert to non-negative std dev
+        if not torch.equal(x_new2[:,:,:4], x_new[:,:,:4]):
+            print('forward: not equal old/new way')
+            1/0
     return x_new, hidden
     
-  def construct_distribution(self, yhat):
+  def xy_loss(self, yhat, y, verbose=True):
     nc = self.num_components
-    bs, seq_len, _ = yhat.shape
-    # takes all but the penup/down part of the yhat
-    mean = yhat[:, :, 0*nc:2*nc]
-    mean=torch.reshape(mean, (bs, seq_len, nc, 2))
-    stddev = yhat[:, :, 2*nc:4*nc]
-    stddev=torch.reshape(stddev, (bs, seq_len, nc, 2))
-    weights = yhat[:, :, 4*nc:5*nc]
-    correlation = yhat[:, :, 5*nc:6*nc]
-    covariance = torch.ones(bs, seq_len, nc, 2, 2, device=self.device)
-    #print(f'correlation shape: {correlation.shape}')
-    #print(f'covariance shape: {covariance.shape}')
-    minor_diagonal = stddev[:, :, :, 0] * stddev[:, :, :, 1] * correlation
-    #print(f'minor_diagonal shape: {minor_diagonal.shape}')
-    # Set major diagonal
-    covariance[:, :, :, 0, 0] = stddev[:, :, :, 0] **2
-    covariance[:, :, :, 1, 1] = stddev[:, :, :, 1] **2
-     # Set minor diagonal
-    covariance[:, :, :, 1, 0] = 0 #minor_diagonal
-    covariance[:, :, :, 0, 1] = 0 #minor_diagonal
-    mix = D.Categorical(weights, validate_args=True)
-    try:
-        comp = MultivariateNormal(mean, covariance, validate_args=True)
-        gmm = D.mixture_same_family.MixtureSameFamily(mix, comp, validate_args=True)
-    except ValueError as err:
-        print(f'construct_distribution: invalid covariance matrix: {covariance} ', exc_info=err)
-    #print(f'covariance shape: {covariance.shape}')
-    return gmm
-
-  def xy_loss(self, yhat, y, verbose=False):
-    nc = self.num_components
-    mc = self.construct_distribution(yhat)
-    losses = mc.log_prob(y)
-    #print(f'loss shape: {losses.shape}')
-    return -losses
-
+    if nc == 1 or args['force_to_1_component']:
+        mean_oldway = yhat[:,:,0:2]
+        stddev_oldway = yhat[:,:,2*nc:2*nc+2]
+        print(f'old way: mean={mean_oldway[0,0,1]}, stddev={stddeev_oldway[0,0,1]}, y={y[0,0,1]')
+        losses_oldway = ((mean_oldway - y)**2)/(2*stddev_oldway**2)  + torch.log(stddev_oldway)  
+    
+    if verbose:
+        #print(f'yhat: {yhat.shape}')
+        print(f'y: {y.shape}')
+    meansx = yhat[:,:,0*nc:1*nc]
+    meansy = yhat[:,:,1*nc:2*nc]
+    stddevx = yhat[:,:,2*nc:3*nc]
+    stddevy = yhat[:,:,3*nc:4*nc]
+    weights = yhat[:, :, 4*nc:5*nc] # shape batch X seq x nc
+    y_repeatedx = y[:,:,:1].repeat([1, 1, nc])
+    y_repeatedy = y[:,:,1:].repeat([1, 1, nc])
+    if verbose:
+        print(f'meansy: {meansx[0,0,1]}')
+        #print(f'meansy: {meansy.shape}')
+        print(f'stddevy: {stddevx[0,0,1]}')
+        #print(f'stddevy: {stddevy.shape}')
+        #print(f'weights: {weights}')
+        print(f'y_repeatedy: {y_repeatedy[0,0,0]}')
+        #print(f'y_repeatedy: {y_repeatedy.shape}')
+    unweighted_lossesx = ((meansx - y_repeatedx)**2)/(2*stddevx**2)  + torch.log(stddevx) # shape batch x seq x nc
+    unweighted_lossesy = ((meansy - y_repeatedy)**2)/(2*stddevy**2)  + torch.log(stddevy) # shape batch x seq x nc
+    if verbose:
+        #print(f'  unweighted_lossesx: {unweighted_lossesx.shape}')
+        print(f'  unweighted_lossesy: {unweighted_lossesy.shape}')
+    weighted_lossesx = torch.sum(unweighted_lossesx * weights, dim=2).unsqueeze(dim=2)
+    weighted_lossesy = torch.sum(unweighted_lossesy * weights, dim=2).unsqueeze(dim=2)
+    if verbose:
+        # print(f'weighted_lossesx: {weighted_lossesx.shape}')
+        print(f'weighted_lossesy: {weighted_lossesy.shape}')
+    losses = torch.cat((weighted_lossesx, weighted_lossesy), dim=2)
+    if verbose:
+        print(f'losses: {losses.shape}')
+    if (nc == 1 or args['force_to_1_component']) and not torch.equal(losses_oldway, losses):
+        #print('xy_loss: old/new way not equal')
+        #print(f'not equal, m losses_oldway.shape: {losses_oldway.shape}')
+        #print(f'not equal, losses.shape: {losses.shape}')
+        print(f'not equal, m losses_oldway: {losses_oldway[0, 0]}')
+        print(f'not equal,          losses: {losses[0, 0]}')
+        1/0
+    return weighted_losses
 
   def loss(self, y_hat, y):
-    #print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
-    #print(f'y_hat: [{y_hat[:,:20:]}, {y[:,:20,:]}')
-    xy_loss = self.xy_loss(y_hat[:,:,1:], y[:,:,1:]) 
-    bce_loss = self.bceWithLogitsLoss(y_hat[:,:,0], y[:,:,0])
-    #print(f'xy_loss: {xy_loss.shape}, bce_loss = {bce_loss.shape}')
-    result = xy_loss + args['weight_updown_loss']*bce_loss
-    #print(f'xy_loss: result: {result.shape}')
-    return result
+      #print(f'y_hat.shape, y.shape: {y_hat.shape} {y.shape}')
+      #print(f'y_hat: [{y_hat[:,:20:]}, {y[:,:20,:]}')
+      xy_loss = self.xy_loss(y_hat[:,:,1:], y[:,:,1:]) 
+      bce_loss = self.bceWithLogitsLoss(y_hat[:,:,:1], y[:,:,:1])
+      #print(f'xy_loss: {xy_loss}, bce_loss = {bce_loss}')
+      return xy_loss + bce_loss
 
   def training_step(self, batch, batch_idx, hiddens=None):
-    data, text, y = batch
-
-    # mask out values where the penup < 0 (padded values are -1)
-    # mask will be of shape (bs, seq_len)
-    mask = torch.where(y[:,:,0] < 0, 0.0, 1.0)
-    
+    data, y = batch
     bs, seq_len, _ = data.shape
     #print(f'batch: {bs}, {seq_len}')
     seq_start = 0
@@ -527,10 +396,8 @@ class HWModel(pl.LightningModule):
     sub_batches = 0
     losses = []
     while seq_start < seq_len:
-        # Use random perturbation of tbptt
-        tbptt_to_use = tbptt + random.choice([0, 1, 2])
-        sub_batch = (data[:, seq_start:seq_start + tbptt_to_use, :],
-                     y[:, seq_start:seq_start + tbptt_to_use, :])
+        sub_batch = (data[:,seq_start:seq_start + tbptt, :],
+                     y[:, seq_start:seq_start + tbptt, :])
         #print(f'sub_batch: {(sub_batch[0].shape, sub_batch[1].shape)}')
         
         #print(f"data.shape {data.shape}")
@@ -542,17 +409,15 @@ class HWModel(pl.LightningModule):
         hiddens.detach()
         losses.append(self.loss(y_hat, sub_batch[1]))
         #print(f'loss: {loss}')
-        seq_start += tbptt_to_use
+        seq_start += tbptt
         sub_batches += 1
-    unmasked_losses = torch.cat(losses, dim=1)
-    masked_losses = unmasked_losses * mask
-    avg_loss = torch.sum(masked_losses) / torch.sum(mask)
-    self.log('loss_train', avg_loss, prog_bar=True)
-    return avg_loss
+    loss = torch.mean(torch.cat(losses, dim=1))
+    self.log('loss_train', loss, prog_bar=True)
+    return loss
 
   def validation_step(self, batch, batch_idx):
     #print(f'validation_step (batch={batch}, batch_idx={batch_idx}')
-    data, text, y = batch
+    data, y = batch
     hidden = self.getNewHidden(batch_size=data.shape[0])
     y_hat, hidden = model(data, hidden)
     #c, t = self.char_accuracy(y_hat, y)
@@ -561,13 +426,13 @@ class HWModel(pl.LightningModule):
     #self.logger.experiment.add_scalars("losses", {"val_loss": losses["total"]})
     #self.log('train_loss', losses, prog_bar=True)
     #self.log("val_accuracy", 100. * c / t)
-    if batch_idx == 0 and (self.current_epoch % args['sample_every_k_epochs']) == 0:
+    if batch_idx == 0 and (self.current_epoch % 2) == 0:
       prompt=self.train_ds[0][0][:30,:]
       remainder=self.train_ds[0][0][30:,:]
-      sample = self.generate_unconditionally(prompt=None)
+      sample = self.generate_unconditionally(prompt)
       #print(f'sample: {sample}')
       print(f'generated HW epoch: {self.current_epoch}')
-      f = plot_stroke(sample, prompt=None, remainder=None)
+      f = plot_stroke(sample, prompt=prompt, remainder=None)
       self.logger.experiment.add_figure('generated HW', f, self.current_epoch)
     return loss
 
@@ -580,15 +445,40 @@ class HWModel(pl.LightningModule):
     output = torch.zeros((output_length+1, 3), device=self.device)
 
     def sample_from_prediction(prediction):
-        nc = self.num_components
         #print(f'sample_from_prediction: {prediction}')
-        result = torch.zeros((3))
-        mc = self.construct_distribution(prediction[:,:,1:])
-        #print(f'created mc')
-        result[1:] = mc.sample()       
         prediction = prediction.cpu()
-        #print(f'sample_from_prediction: result[1:]={result[1:]}')
-        result[0] = 1 if  torch.sigmoid(prediction[0, 0, 0]) > random.random() else 0
+        result = torch.zeros((3))
+        result[0] = 1 if  torch.sigmoid(prediction[0]) > random.random() else 0
+        means_old = prediction[1:3]
+        stddev_old = prediction[3:5]
+        # generate random values with given means and standard devs  
+        nc = self.num_components
+        #print(f'sample_from_prediction: prediction: {prediction}')
+        means = prediction[1+0*nc:1+2*nc]
+        stddev = prediction[1+2*nc:1+4*nc]
+
+        if nc == 1 and not torch.equal(means_old, means):
+            print('sample_from_prediction: old/new means not equal')
+            1/0
+        if nc == 1 and not torch.equal(stddev_old, stddev):
+            print('sample_from_prediction: old/new means not equal')
+            1/0
+        #print(f'1: means: {means}, stddev: {stddev}')
+        unweighted_xys = torch.normal(means, stddev)
+        #print(f'unweighted_xys: {unweighted_xys}')
+        #print(f'sample_from_prediction: means: {means}')
+        #print(f'sample_from_prediction: stddev: {stddev}')
+        #print(f'sample_from_prediction: unweighted_xys: {unweighted_xys}')
+        weights = prediction[1+4*nc:1+5*nc]
+        #print(f'sample_from_prediction: weights: {weights}')
+        result[1] = torch.sum(unweighted_xys[:nc]*weights)
+        result[2] = torch.sum(unweighted_xys[nc:]*weights)
+        if nc == 1 and not torch.equal(result[1:], unweighted_xys):
+            print('sample_from_prediction: old/new weighting not equal')
+            1/0
+
+        #print(f'result[1:]: {result[1:]}')
+        #print(f'sample_from_prediction: result: {result}')
         return result
 
     if prompt is not None:
@@ -600,7 +490,7 @@ class HWModel(pl.LightningModule):
         predictions, hidden = self.forward(input, hidden)
         if verbose:
             print(f"predictions: {predictions}")
-        output[0] = sample_from_prediction(predictions[:, -1:, :])
+        output[0] = sample_from_prediction(predictions[0, -1, :])
 
     for idx in range(output_length):
       with torch.no_grad():
@@ -608,7 +498,7 @@ class HWModel(pl.LightningModule):
         predictions, hidden = self.forward(input, hidden)
 
       # Only use the last prediction.
-      output[idx+1] = sample_from_prediction(predictions[:, -1:, :])
+      output[idx+1] = sample_from_prediction(predictions[0, -1, :])
 
 
     if prompt is not None:
@@ -635,34 +525,22 @@ class HWModel(pl.LightningModule):
       datadir = hwdir / 'data'
       strokes = np.load(datadir / 'strokes-py3.npy', allow_pickle=True)
       self.strokes = strokes
-      with (datadir / 'sentences.txt').open() as f:
-          texts = f.readlines()
-      self.texts = [t.strip() for t in texts]
 
 
   @staticmethod
   def dataloader_collate_fn(data):
     data.sort(key=lambda x: len(x[0]), reverse=True)
     xs = [d[0] for d in data]
-    ts = [d[1] for d in data]
-    ys = [d[2] for d in data]
+    ys = [d[1] for d in data]
 
     # Must have same seq_len for each item in batch
     # So, chop them off
+    # TODO(neil): Pad short, rather than cut long
     chop_len = min([x.shape[0] for x in xs])
-    chop_len_t = min([t.shape[0] for t in ts])
     xs = [x[:chop_len] for x in xs]
-    ts = [t[:chop_len_t] for t in ts]
     ys = [y[:chop_len] for y in ys]
-    result = (torch.stack(xs, dim=0), torch.stack(ts, dim=0), torch.stack(ys, dim=0))
-    (xresult, tresult, yresult) = result
-    if xresult.isnan().any():
-        print('dataloader_collate_fn: xresult nan: {xresult}')
-    if tresult.isnan().any():
-        print('dataloader_collate_fn: tresult nan: {tresult}')
-    if yresult.isnan().any():
-        print('dataloader_collate_fn: yresult nan: {yresult}')
-    return result   
+    result = (torch.stack(xs, dim=0), torch.stack(ys, dim=0))
+    return result
               
   def train_dataloader(self):
       return DataLoader(self.train_ds, shuffle=True, batch_size=self.bs, collate_fn=self.dataloader_collate_fn, num_workers=1)
@@ -671,17 +549,6 @@ class HWModel(pl.LightningModule):
       return DataLoader(self.val_ds, shuffle=False, batch_size=self.bs, collate_fn=self.dataloader_collate_fn, num_workers=1)
 
 
-  def setup_strokes(self, strokes):
-    self.strokes = []
-    for stroke in strokes:
-      stroke[:, 1:] = stroke[:, 1:] - self.stats['mean'] / self.stats['std']
-      self.strokes.append(stroke[:args['max_seq_len']])
-
-  def setup_texts(self, texts):
-    self.texts = []
-    for text in texts:
-      self.texts.append(self.to_onehot(text))
-
   def setup(self, stage = None):
       train_split = int(len(self.strokes)*0.95)
       #valid_split = len(self.strokes) - train_split
@@ -689,8 +556,6 @@ class HWModel(pl.LightningModule):
 
       train_strokes = self.strokes[:min(args['max_training_samples'], train_split)]
       valid_strokes = self.strokes[train_split:train_split + args['max_validation_samples']]
-      train_texts = self.texts[:min(args['max_training_samples'], train_split)]
-      valid_texts = self.texts[train_split:train_split + args['max_validation_samples']]
 
       #train_strokes = self.strokes[:1]
       #valid_strokes = self.strokes[1:2]
@@ -704,8 +569,8 @@ class HWModel(pl.LightningModule):
       self.stats = calc_stats(train_strokes)
       print(f'stats: {self.stats}')
 
-      self.train_ds = HWPairsDataset(train_strokes, train_texts, self.stats)
-      self.val_ds = HWPairsDataset(valid_strokes, valid_texts, self.stats)
+      self.train_ds = SeqDataset(train_strokes, self.stats)
+      self.val_ds = SeqDataset(valid_strokes, self.stats)
       print(f'HWDataModule: len(train_ds) = {len(self.train_ds)}, len(val_ds)={len(self.val_ds)}')
 
 
@@ -734,7 +599,7 @@ trainer = pl.Trainer(
     max_epochs=args["epochs"],
     num_sanity_val_steps=0,
     accelerator='gpu',
-    devices=[1],
+    devices=1,
     logger=logger,
     log_every_n_steps=1,
     callbacks=[MyPrintingCallback()],
