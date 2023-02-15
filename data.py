@@ -24,6 +24,8 @@ def collate_fn(samples):
     return all_texts, texts_mask, all_strokes, strokes_mask
     
 class HandwritingDataset(Dataset):
+    CHARSET="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,\" -"
+
     def __init__(self, is_validation=False, validation_percentage=.1, data_dir=Path('./descript-research-test/data')):
         super().__init__()
         self.strokes = np.load(data_dir / 'strokes-py3.npy', allow_pickle=True)
@@ -40,13 +42,23 @@ class HandwritingDataset(Dataset):
             self.strokes = self.strokes[:-num_validation]
 
     def char2index(self, ch):
-        return ord(ch)
+        index = self.CHARSET.find(ch)
+        if index < 0:
+            index = len(self.CHARSET)
+        return index + 1
 
     def index2char(self, i):
-        return chr(i)
+        # index of 0 is treated as empty character. Implicitly masked
+        if i == 0:
+            return ''
+        i = i - 1
+        if i < len(self.CHARSET):
+            return self.CHARSET[i]
+        else:
+            return '?'
 
     def text2code(self, s):
-        return np.array([self.char2index(c) for c in s], dtype=np.int16)
+        return np.array([self.char2index(c) for c in s], dtype=np.int8)
 
     def code2text(self, s):
         return ''.join([self.index2char(i) for i in np.nditer(s)])
