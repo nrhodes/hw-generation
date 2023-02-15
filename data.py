@@ -16,22 +16,23 @@ def collate_fn(samples):
     strokes_mask = torch.ones((all_strokes.shape[0], batch_size), dtype=torch.bool)
     texts_mask = torch.ones((all_texts.shape[0], batch_size), dtype=torch.bool)
     for i in range(batch_size):
-        this_texts_len = texts[i].shape[0]
-        texts_mask[this_texts_len:,i] = 0
-        this_stroke_len = strokes[i].shape[0]
-        strokes_mask[this_stroke_len:,i] = 0
+        texts_mask[len(texts[i]):,i] = 0
+        strokes_mask[len(strokes[i]):,i] = 0
 
     return all_texts, texts_mask, all_strokes, strokes_mask
     
 class HandwritingDataset(Dataset):
-    CHARSET="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,\" -"
-
     def __init__(self, is_validation=False, validation_percentage=.1, data_dir=Path('./descript-research-test/data')):
         super().__init__()
         self.strokes = np.load(data_dir / 'strokes-py3.npy', allow_pickle=True)
         sents = (data_dir / 'sentences.txt').read_text().splitlines()
+        assert len(sents) == len(self.strokes)
+        
+        # 0 maps to empty character
+        self.itoc = [''] + sorted(list({c for s in sents for c in s}))
+        self.ctoi = {c: i for i, c in enumerate(self.itoc)}
+
         self.sentences = [self.text2code(s) for s in sents]
-        assert len(self.sentences) == len(self.strokes)
 
         num_validation = math.floor(len(self.strokes) * validation_percentage)
         if is_validation:
@@ -58,10 +59,10 @@ class HandwritingDataset(Dataset):
             return '?'
 
     def text2code(self, s):
-        return np.array([self.char2index(c) for c in s], dtype=np.int8)
+        return np.array([self.ctoi[c] for c in s], dtype=np.int8)
 
     def code2text(self, s):
-        return ''.join([self.index2char(i) for i in np.nditer(s)])
+        return ''.join([self.itoc[i] for i in np.nditer(s)])
 
     def __len__(self):
         return len(self.strokes)
