@@ -3,8 +3,8 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 import math
 import numpy as np
-import plot_stroke
 import torch
+import utils
 
 def collate_fn(samples):
     batch_size=len(samples)
@@ -83,7 +83,7 @@ def main():
     for i in range(texts.shape[1]):
         print(f"text {i}: {dataset.code2text(texts[:,i].numpy())}")
         print(f"text mask {i}: {texts_mask[:,i]}")
-        plot_stroke.plot_stroke(strokes[:,i])
+        utils.plot_stroke(strokes[:,i])
 
 
 if __name__ == "__main__":
