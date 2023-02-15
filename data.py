@@ -4,33 +4,22 @@ from pathlib import Path
 import math
 import numpy as np
 import torch
+from torch.nn.utils.rnn import pad_sequence
 import utils
 
 def collate_fn(samples):
     batch_size=len(samples)
-    strokes = [s for s, text in samples]
-    texts = [text for s, text in samples]
+    strokes, texts = zip(*samples)
 
-    max_stroke_len = max([len(s) for s in strokes])
-    num_stroke_elements=strokes[0].shape[1]
-    all_strokes = torch.zeros((max_stroke_len, batch_size, num_stroke_elements))
-    strokes_mask = torch.ones((max_stroke_len, batch_size), dtype=torch.bool)
-    for i in range(batch_size):
-        this_stroke_len = strokes[i].shape[0]
-        # pad
-        all_strokes[:this_stroke_len,i] = torch.tensor(strokes[i])
-        # mask
-        strokes_mask[this_stroke_len:,i] = 0
-
-    max_texts_length = max([len(t) for t in texts])
-    all_texts = torch.zeros((max_texts_length, batch_size), dtype=torch.int8)
-    texts_mask = torch.ones((max_texts_length, batch_size), dtype=torch.bool)
+    all_strokes = pad_sequence([torch.tensor(s) for s in strokes])
+    all_texts = pad_sequence([torch.tensor(t) for t in texts])
+    strokes_mask = torch.ones((all_strokes.shape[0], batch_size), dtype=torch.bool)
+    texts_mask = torch.ones((all_texts.shape[0], batch_size), dtype=torch.bool)
     for i in range(batch_size):
         this_texts_len = texts[i].shape[0]
-        # pad
-        all_texts[:this_texts_len,i] = torch.tensor(texts[i])
-        # mask
         texts_mask[this_texts_len:,i] = 0
+        this_stroke_len = strokes[i].shape[0]
+        strokes_mask[this_stroke_len:,i] = 0
 
     return all_texts, texts_mask, all_strokes, strokes_mask
     
