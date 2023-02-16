@@ -1,10 +1,12 @@
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
+from argparse import ArgumentParser
+import argparse
 from pathlib import Path
 import math
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
 import utils
 
 def collate_fn(samples):
@@ -20,14 +22,19 @@ def collate_fn(samples):
         strokes_mask[len(strokes[i]):,i] = 0
 
     return all_texts, texts_mask, all_strokes, strokes_mask
-    
+
+def infinite_dl(dl):
+    while True:
+        for batch in iter(dl):
+            yield batch
+
 class HandwritingDataset(Dataset):
     def __init__(self, is_validation=False, validation_percentage=.1, data_dir=Path('./descript-research-test/data')):
         super().__init__()
         self.strokes = np.load(data_dir / 'strokes-py3.npy', allow_pickle=True)
         sents = (data_dir / 'sentences.txt').read_text().splitlines()
         assert len(sents) == len(self.strokes)
-        
+
         # 0 maps to empty character
         self.itoc = [''] + sorted(list({c for s in sents for c in s}))
         self.ctoi = {c: i for i, c in enumerate(self.itoc)}
@@ -72,20 +79,38 @@ class HandwritingDataset(Dataset):
 
 
 def main():
-    dataset = HandwritingDataset()
+    parser = ArgumentParser(prog="model")
+    parser.add_argument("--show_regular", default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--show_inf_dl", action=argparse.BooleanOptionalAction)
+    args = parser.parse_args()
 
-    dl = DataLoader(dataset, shuffle=True, batch_size=4, collate_fn=collate_fn)
-    texts, texts_mask, strokes, strokes_mask = next(iter(dl))
+    if args.show_regular:
+        dataset = HandwritingDataset()
+        dl = DataLoader(dataset, shuffle=True, batch_size=4, collate_fn=collate_fn)
+        texts, texts_mask, strokes, strokes_mask = next(iter(dl))
+        print(f"texts.shape: {texts.shape}")
+        print(f"texts_mask.shape: {texts_mask.shape}")
+        print(f"strokes.shape: {strokes.shape}")
+        print(f"strokes_mask.shape: {strokes_mask.shape}")
 
-    print(f"texts.shape: {texts.shape}")
-    print(f"texts_mask.shape: {texts_mask.shape}")
-    print(f"strokes.shape: {strokes.shape}")
-    print(f"strokes_mask.shape: {strokes_mask.shape}")
+        for i in range(texts.shape[1]):
+            print(f"text {i}: {dataset.code2text(texts[:,i].numpy())}")
+            print(f"text mask {i}: {texts_mask[:,i]}")
+            utils.plot_stroke(strokes[:,i])
 
-    for i in range(texts.shape[1]):
-        print(f"text {i}: {dataset.code2text(texts[:,i].numpy())}")
-        print(f"text mask {i}: {texts_mask[:,i]}")
-        utils.plot_stroke(strokes[:,i])
+    if args.show_inf_dl:
+        dataset = HandwritingDataset(is_validation=True, validation_percentage=.02)
+        dl = DataLoader(dataset, shuffle=True, batch_size=4, collate_fn=collate_fn)
+        print(f"num batches in dl: {len(list(dl))}")
+        inf = infinite_dl(dl)
+        max_step = 100
+        step = 0
+
+        for texts, texts_mask, strokes, strokes_mask in inf:
+            step += 1
+            if step > max_step:
+                break
+            print(f"text from batch {step}: {dataset.code2text(texts[:,0].numpy())}")
 
 
 if __name__ == "__main__":
