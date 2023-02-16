@@ -28,10 +28,19 @@ def infinite_dl(dl):
         for batch in iter(dl):
             yield batch
 
+def align_stroke(stroke):
+    # take average of y movements, but skip the beg and end (since they are often outliers)
+    avg = np.average(stroke[15:-15, 2])
+    #print(f"aligning: average before ={avg}")
+    stroke[:,2] -= avg*.75
+    return stroke
+
 class HandwritingDataset(Dataset):
-    def __init__(self, is_validation=False, validation_percentage=.1, data_dir=Path('./descript-research-test/data')):
+    def __init__(self, aligned=True, is_validation=False, validation_percentage=.1, data_dir=Path('./descript-research-test/data')):
         super().__init__()
         self.strokes = np.load(data_dir / 'strokes-py3.npy', allow_pickle=True)
+        if aligned:
+            self.strokes = [align_stroke(stroke) for stroke in self.strokes]
         sents = (data_dir / 'sentences.txt').read_text().splitlines()
         assert len(sents) == len(self.strokes)
 
@@ -81,8 +90,17 @@ class HandwritingDataset(Dataset):
 def main():
     parser = ArgumentParser(prog="model")
     parser.add_argument("--show_regular", default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--use_aligned", default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument("--show_inf_dl", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--show_alignments", action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
+
+    if args.show_alignments:
+        data_dir=Path('./descript-research-test/data')
+        strokes = np.load(data_dir / 'strokes-py3.npy', allow_pickle=True)
+        for i in range(10):
+            utils.plot_stroke(strokes[i])
+            utils.plot_stroke(align_stroke(strokes[i]))
 
     if args.show_regular:
         dataset = HandwritingDataset()
