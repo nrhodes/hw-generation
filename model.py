@@ -18,7 +18,7 @@ class Scribe(nn.Module):
         return output
 
     def step(self, x, hidden):
-        x, hidden = self.rnn(x)
+        x, hidden = self.rnn(x, hidden)
         output = self.linear(x)
         return output, hidden
 
