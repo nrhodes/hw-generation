@@ -16,6 +16,7 @@ def train(
         save_path: Path = Path('runs') / datetime.now().isoformat(),
         num_training_iterations: int = 1000,
         batch_size: int = 40,
+        device: str = "cpu",
         random_seed: int = None):
 
     """Trains model, samples an output, and displays it
@@ -24,7 +25,9 @@ def train(
     ----------
     save_path : Path
         The location of the tensorboard run (defaults to runs/CURDATETIME)
-    """    
+    device: str
+        Which GPU device to run on ("cuda:0", "cuda:1", etc.) or "cpu" to run on CPU
+    """
     writer = SummaryWriter(save_path)
     if random_seed:
         print(f"Setting random seed: {random_seed}")
@@ -34,6 +37,8 @@ def train(
     dl = utils.infinite_dl(dl)
 
     model = Scribe()
+    model = model.to(device)
+
     optimizer = optim.Adam(model.parameters())
 
     iteration_times = []
@@ -43,6 +48,7 @@ def train(
             break
         optimizer.zero_grad()
         start = time.time()
+        strokes = strokes.to(device)
         output = model(strokes)
         iteration_times.append(time.time() - start)
 
@@ -59,7 +65,7 @@ def train(
     with torch.no_grad():
         model.eval()
         sample = model.sample(batch_size=1)
-        utils.plot_stroke(sample[:, 0])
+        utils.plot_stroke(sample[:, 0].to("cpu"))
 
 
 def main():
