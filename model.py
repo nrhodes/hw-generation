@@ -22,8 +22,12 @@ class Scribe(nn.Module):
         output = self.linear(x)
         return output, hidden
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     def sample(self, batch_size=1, num_steps=100):
-        x = torch.zeros(1, batch_size, 3)
+        x = torch.zeros(1, batch_size, 3).to(self.device)
         hidden = None
         output = []
         for i in range(num_steps):
@@ -32,7 +36,7 @@ class Scribe(nn.Module):
         return torch.vstack(output)
 
 
-    
+
 
 def main():
     parser = ArgumentParser(prog="model")

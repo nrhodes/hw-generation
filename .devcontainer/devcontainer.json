@@ -1,0 +1,75 @@
+{
+    "name": "Video Research",
+    "image": "us.gcr.io/lyrebird-research/research-image/video:latest",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "njpwerner.autodocstring",
+                "ms-toolsai.jupyter",
+                "ms-toolsai.jupyter-renderers",
+                "ms-toolsai.jupyter-keymap",
+                "github.copilot"
+            ],
+            "settings": {
+                "python.formatting.provider": "black",
+                "python.linting.enabled": true,
+                "python.linting.lintOnSave": true,
+                "python.defaultInterpreterPath": "/usr/bin/python",
+                "editor.formatOnSave": true,
+                "[python]": {
+                    "editor.defaultFormatter": "ms-python.vscode-pylance",
+                    "editor.codeActionsOnSave": {
+                        "source.organizeImports": true
+                    },
+                    "editor.tabSize": 4
+                },
+                "files.eol": "\n",
+                "files.insertFinalNewline": true,
+                "files.trimFinalNewlines": true,
+                "files.trimTrailingWhitespace": true,
+                "isort.args": [
+                    "--profile",
+                    "black"
+                ],
+                "jupyter.runStartupCommands": [
+                    "%load_ext autoreload",
+                    "%autoreload 2"
+                ],
+                "notebook.output.textLineLimit": 300,
+                "diffEditor.ignoreTrimWhitespace": false
+            }
+        }
+    },
+    "containerEnv": {
+        "USER": "researcher"
+    },
+    "remoteUser": "researcher",
+    "runArgs": [
+        "--shm-size=32G",
+        "--gpus",
+        "all",
+        "--rm",
+        "-v",
+        "${localEnv:SSH_AUTH_SOCK}:/ssh-agent",
+        "-e",
+        "SSH_AUTH_SOCK=/ssh-agent",
+        "-v",
+        "/data:/data",
+        "-v",
+        "/data1:/data1",
+        "-v",
+        "/data2:/data2",
+        "-v",
+        "/data3:/data3",
+        "-v",
+        "/home/${localEnv:USER}/.config:/u/home/.config",
+        "-v",
+        "/home/${localEnv:USER}/Code:/u/home/Code",
+        "-v",
+        "/home/${localEnv:USER}/dump:/u/home/dump",
+        "-e",
+        "GOOGLE_APPLICATION_CREDENTIALS=/u/home/.config/gcloud/research-gcp.json"
+    ]
+}
