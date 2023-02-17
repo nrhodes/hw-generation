@@ -16,6 +16,7 @@ def train(
         save_path: Path = Path('runs') / datetime.now().isoformat(),
         num_training_iterations: int = 1000,
         batch_size: int = 40,
+        device: str = "cpu",
         random_seed: int = None):
 
     """Trains model, samples an output, and displays it
@@ -24,6 +25,8 @@ def train(
     ----------
     save_path : Path
         The location of the tensorboard run (defaults to runs/CURDATETIME)
+    device: str
+        Which GPU device to run on ("cuda:0", "cuda:1", etc.) or "cpu" to run on CPU
     """
     writer = SummaryWriter(save_path)
     if random_seed:
@@ -32,13 +35,6 @@ def train(
     dataset = data.HandwritingDataset()
     dl = DataLoader(dataset, shuffle=True, batch_size=batch_size, collate_fn=data.collate_fn)
     dl = utils.infinite_dl(dl)
-
-    n_gpu = torch.cuda.device_count()
-    if n_gpu == 0:
-        device = "cpu"
-    else:
-        torch.cuda.set_device(0)
-        device = "cuda"
 
     model = Scribe()
     model = model.to(device)
