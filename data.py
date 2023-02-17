@@ -23,11 +23,6 @@ def collate_fn(samples):
 
     return all_texts, texts_mask, all_strokes, strokes_mask
 
-def infinite_dl(dl):
-    while True:
-        for batch in iter(dl):
-            yield batch
-
 class HandwritingDataset(Dataset):
     def __init__(self, is_validation=False, validation_percentage=.1, data_dir=Path('./descript-research-test/data')):
         super().__init__()

@@ -56,3 +56,9 @@ def plot_stroke(stroke, save_name=None):
         print("Error building image!: " + save_name)
 
     return f
+
+def infinite_dl(dl):
+    while True:
+        for batch in iter(dl):
+            yield batch
+

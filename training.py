@@ -1,53 +1,75 @@
-from argparse import ArgumentParser
-import argparse
+import argbind
+from datetime import datetime
+from pathlib import Path
+import time
 from torch.utils.data import DataLoader
 import torch.optim as optim
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-
 import data
 from model import Scribe
 import utils
 
-def train(model, dl, num_training_iterations):
-    writer = SummaryWriter()
+@argbind.bind(without_prefix=True)
+def train(
+        save_path: Path = Path('runs') / datetime.now().isoformat(),
+        num_training_iterations: int = 1000,
+        batch_size: int = 40,
+        random_seed: int = None):
+
+    """Trains model, samples an output, and displays it
+
+    Parameters
+    ----------
+    save_path : Path
+        The location of the tensorboard run (defaults to runs/CURDATETIME)
+    """    
+    writer = SummaryWriter(save_path)
+    if random_seed:
+        print(f"Setting random seed: {random_seed}")
+        torch.manual_seed(random_seed)
+    dataset = data.HandwritingDataset()
+    dl = DataLoader(dataset, shuffle=True, batch_size=batch_size, collate_fn=data.collate_fn)
+    inf = utils.infinite_dl(dl)
+
+    model = Scribe()
     optimizer = optim.Adam(model.parameters())
+
+    iteration_times = []
     for iteration, batch in enumerate(dl):
         texts, texts_mask, strokes, strokes_mask = batch
         if iteration >= num_training_iterations:
             break
         optimizer.zero_grad()
+        start = time.time()
         output = model(strokes)
+        iteration_times.append(time.time() - start)
 
         # output[0] is the prediction, strokes[1] is the ground truth
         loss = ((strokes[1:] - output[:-1]) ** 2).mean()
         if (iteration % 10) == 0:
-            print(f"{loss.item()=:.4f}")
+            print(f"iter {iteration:4d}: {loss.item()=:.4f}")
         writer.add_scalar('Loss/train', loss.item(), iteration)
         loss.backward()
         optimizer.step()
+    print(f"mean iteration time: {torch.tensor(iteration_times).mean():.4f}")
 
-
-def main():
-    parser = ArgumentParser(prog="train")
-    #parser.add_argument("--test_unrolled", action=argparse.BooleanOptionalAction)
-    parser.add_argument("--random_seed", default=None, type=int)
-    parser.add_argument("--num_training_iterations", default=1000, type=int)
-    args = parser.parse_args()
-
-    if args.random_seed:
-        torch.manual_seed(args.random_seed)
-    dataset = data.HandwritingDataset()
-    dl = DataLoader(dataset, shuffle=True, batch_size=40, collate_fn=data.collate_fn)
-    inf = data.infinite_dl(dl)
-
-    model = Scribe()
-    train(model, inf, args.num_training_iterations)
+    # evaluation
     with torch.no_grad():
         model.eval()
         sample = model.sample(batch_size=1)
         utils.plot_stroke(sample[:, 0])
+
+
+def main():
+    args = argbind.parse_args()
+    args["save_path"].mkdir(exist_ok=True, parents=True)
+    argbind.dump_args(args, args["save_path"] / "args.yml")
+
+    with argbind.scope(args):
+        train()
+
 
 if __name__ == "__main__":
     main()
