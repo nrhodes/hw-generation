@@ -31,7 +31,7 @@ def train(
         torch.manual_seed(random_seed)
     dataset = data.HandwritingDataset()
     dl = DataLoader(dataset, shuffle=True, batch_size=batch_size, collate_fn=data.collate_fn)
-    inf = utils.infinite_dl(dl)
+    dl = utils.infinite_dl(dl)
 
     model = Scribe()
     optimizer = optim.Adam(model.parameters())
