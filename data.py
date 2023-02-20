@@ -1,13 +1,15 @@
-from argparse import ArgumentParser
-import argparse
-from pathlib import Path
 import math
+from argparse import ArgumentParser
+from pathlib import Path
+
+import argbind
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
+
 import utils
+
 
 def collate_fn(samples):
     batch_size=len(samples)
@@ -24,6 +26,7 @@ def collate_fn(samples):
     return all_texts, texts_mask, all_strokes, strokes_mask
 
 class HandwritingDataset(Dataset):
+    @argbind.bind(without_prefix=True)
     def __init__(self, is_validation=False, validation_percentage=.1, data_dir=Path('./descript-research-test/data')):
         super().__init__()
         self.strokes = np.load(data_dir / 'strokes-py3.npy', allow_pickle=True)
@@ -73,13 +76,9 @@ class HandwritingDataset(Dataset):
         return self.strokes[idx], self.sentences[idx]
 
 
-def main():
-    parser = ArgumentParser(prog="model")
-    parser.add_argument("--show_regular", default=True, action=argparse.BooleanOptionalAction)
-    parser.add_argument("--show_inf_dl", action=argparse.BooleanOptionalAction)
-    args = parser.parse_args()
-
-    if args.show_regular:
+@argbind.bind(without_prefix=True)
+def main(show_regular=True, show_inf_dl=False):
+    if show_regular:
         dataset = HandwritingDataset()
         dl = DataLoader(dataset, shuffle=True, batch_size=4, collate_fn=collate_fn)
         texts, texts_mask, strokes, strokes_mask = next(iter(dl))
@@ -93,15 +92,15 @@ def main():
             print(f"text mask {i}: {texts_mask[:,i]}")
             utils.plot_stroke(strokes[:,i])
 
-    if args.show_inf_dl:
+    if show_inf_dl:
         dataset = HandwritingDataset(is_validation=True, validation_percentage=.02)
         dl = DataLoader(dataset, shuffle=True, batch_size=4, collate_fn=collate_fn)
         print(f"num batches in dl: {len(list(dl))}")
-        inf = infinite_dl(dl)
+        dl = utils.infinite_dl(dl)
         max_step = 100
         step = 0
 
-        for texts, texts_mask, strokes, strokes_mask in inf:
+        for texts, texts_mask, strokes, strokes_mask in dl:
             step += 1
             if step > max_step:
                 break
@@ -109,4 +108,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    args = argbind.parse_args()
+    with argbind.scope(args):
+        main()
