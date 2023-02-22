@@ -1,12 +1,16 @@
 from argparse import ArgumentParser
-from torch.utils.data import DataLoader
-from torch import nn
+
+import argbind
 import torch
+from torch import nn
+from torch.utils.data import DataLoader
 
 import data
 import utils
 
+
 class Scribe(nn.Module):
+    @argbind.bind(without_prefix=True)
     def __init__(self, input_size=3, hidden_size=20, output_size=3):
         super(Scribe, self).__init__()
         self.rnn = nn.GRU(input_size=input_size, hidden_size=hidden_size, num_layers=1)
@@ -26,7 +30,8 @@ class Scribe(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
-    def sample(self, batch_size=1, num_steps=100):
+    @argbind.bind
+    def sample(self, batch_size=1, num_steps=100, bias=0.0):
         x = torch.zeros(1, batch_size, 3).to(self.device)
         hidden = None
         output = []
@@ -38,13 +43,9 @@ class Scribe(nn.Module):
 
 
 
-def main():
-    parser = ArgumentParser(prog="model")
-    parser.add_argument("--show_strokes", action='store_true')
-    parser.add_argument("--show_output", action='store_true')
-    parser.add_argument("--show_samples", action='store_true')
-    args = parser.parse_args()
 
+@argbind.bind(without_prefix=True)
+def main(show_strokes=True, show_output=False, show_samples=False):
     dataset = data.HandwritingDataset()
     dl = DataLoader(dataset, shuffle=True, batch_size=4, collate_fn=data.collate_fn)
     texts, texts_mask, strokes, strokes_mask = next(iter(dl))
@@ -57,22 +58,24 @@ def main():
         output = model(strokes)
         print(f"{output.shape=}")
 
-        if args.show_strokes:
+        if show_strokes:
             print("strokes")
             for i in range(strokes.shape[1]):
                 utils.plot_stroke(strokes[:,i])
 
-        if args.show_output:
+        if show_output:
             print("outputs")
             for i in range(output.shape[1]):
                 utils.plot_stroke(output[:,i])
 
-        if args.show_samples:
-            sample = model.sample(batch_size=3) # since our sampling has no stochasticity, sample will always return the same sample
+        if show_samples:
+            sample = model.sample(batch_size=3)
             print("samples (shape: {sample.shape})")
             for i in range(sample.shape[1]):
                 utils.plot_stroke(sample[:,i])
 
 
 if __name__ == "__main__":
-    main()
+    args = argbind.parse_args()
+    with argbind.scope(args):
+        main()
