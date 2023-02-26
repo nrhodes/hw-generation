@@ -1,15 +1,32 @@
-import argbind
+import time
 from datetime import datetime
 from pathlib import Path
-import time
-from torch.utils.data import DataLoader
-import torch.optim as optim
+
+import argbind
 import torch
+import torch.optim as optim
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 import data
-from model import Scribe
 import utils
+from model import Scribe
+
+
+@argbind.bind
+def scribe_loss(prediction, target, target_mask, penup_weighting=.5):
+    mse_func = torch.nn.MSELoss(reduction='none')
+    binary_crossentropy_func = torch.nn.BCEWithLogitsLoss(reduction='none')
+
+    penup_loss = binary_crossentropy_func(prediction[:, :, 0:1], target[:, :, 0:1])
+    penup_loss = penup_loss.sum(dim=2)
+    coords_loss = mse_func(prediction[:, :, 1:3], target[:, :, 1:3])
+    coords_loss = coords_loss.sum(dim=2)
+    loss =  penup_weighting*penup_loss + (1-penup_weighting)*coords_loss
+    loss = loss.masked_select(target_mask)
+    return loss.mean()
+
 
 @argbind.bind(without_prefix=True)
 def train(
@@ -42,30 +59,46 @@ def train(
     optimizer = optim.Adam(model.parameters())
 
     iteration_times = []
-    for iteration, batch in enumerate(dl):
-        texts, texts_mask, strokes, strokes_mask = batch
-        if iteration >= num_training_iterations:
-            break
-        optimizer.zero_grad()
-        start = time.time()
-        strokes = strokes.to(device)
-        output = model(strokes)
-        iteration_times.append(time.time() - start)
+    with tqdm(total=num_training_iterations) as pbar:
+        for iteration, batch in enumerate(dl):
+            texts, texts_mask, strokes, strokes_mask = batch
+            if iteration >= num_training_iterations:
+                break
+            optimizer.zero_grad()
+            start = time.time()
+            strokes = strokes.to(device)
+            output = model(strokes)
+            iteration_times.append(time.time() - start)
 
-        # output[0] is the prediction, strokes[1] is the ground truth
-        loss = ((strokes[1:] - output[:-1]) ** 2).mean()
-        if (iteration % 10) == 0:
-            print(f"iter {iteration:4d}: {loss.item()=:.4f}")
-        writer.add_scalar('Loss/train', loss.item(), iteration)
-        loss.backward()
-        optimizer.step()
+            # output[:-1] is the prediction, strokes[1:] is the ground truth
+            loss = scribe_loss(output[:-1], strokes[1:], strokes_mask[1:].to(device))
+            writer.add_scalar('Loss/train', loss.item(), iteration)
+            loss.backward()
+            optimizer.step()
+            if (iteration % 100) == 0:
+                with torch.no_grad():
+                    model.eval()
+                    sample = model.sample()
+                    f = utils.plot_stroke(sample[:, 0].to("cpu"))
+                    writer.add_figure(f"sample, bias: 0", figure=f, global_step=iteration)
+                    model.train()
+
+            pbar.postfix = f": Loss: {loss.item():.4f}"
+
+            pbar.postfix = f": Loss: {loss.item():.4f}"
+            pbar.update()
     print(f"mean iteration time: {torch.tensor(iteration_times).mean():.4f}")
 
     # evaluation
     with torch.no_grad():
         model.eval()
-        sample = model.sample(batch_size=1)
-        utils.plot_stroke(sample[:, 0].to("cpu"))
+        for bias in [0, .1, .5, 2, 5, 10]:
+            sample = model.sample(bias=bias)
+            f = utils.plot_stroke(sample[:, 0].to("cpu"))
+            writer.add_figure(f"sample, bias: {bias}", f, global_step=num_training_iterations)
+        # for some reason, last added figure never shows up
+        writer.add_figure(f"sacrificial figure", f)
+
 
 
 def main():
