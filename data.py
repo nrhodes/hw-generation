@@ -40,12 +40,13 @@ class HandwritingDataset(Dataset):
         self.sentences = [self.text2code(s) for s in sents]
 
         num_validation = math.floor(len(self.strokes) * validation_percentage)
-        if is_validation:
-            self.sentences = self.sentences[-num_validation:]
-            self.strokes = self.strokes[-num_validation:]
-        else:
-            self.sentences = self.sentences[:-num_validation]
-            self.strokes = self.strokes[:-num_validation]
+        if num_validation > 0:
+            if is_validation:
+                self.sentences = self.sentences[-num_validation:]
+                self.strokes = self.strokes[-num_validation:]
+            else:
+                self.sentences = self.sentences[:-num_validation]
+                self.strokes = self.strokes[:-num_validation]
 
     def char2index(self, ch):
         index = self.CHARSET.find(ch)
