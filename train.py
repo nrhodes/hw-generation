@@ -16,12 +16,11 @@ from model import Scribe
 
 @argbind.bind
 def scribe_loss(prediction, target, target_mask, penup_weighting=.5):
-    mse_func = torch.nn.MSELoss(reduction='none')
-    binary_crossentropy_func = torch.nn.BCEWithLogitsLoss(reduction='none')
+    mse_loss = torch.nn.MSELoss(reduction='none')
+    bce_loss = torch.nn.BCEWithLogitsLoss(reduction='none')
 
-    penup_loss = binary_crossentropy_func(prediction[:, :, 0:1], target[:, :, 0:1])
-    penup_loss = penup_loss.sum(dim=2)
-    coords_loss = mse_func(prediction[:, :, 1:3], target[:, :, 1:3])
+    penup_loss = bce_loss(prediction[:, :, 0:1], target[:, :, 0:1]).squeeze()
+    coords_loss = mse_loss(prediction[:, :, 1:3], target[:, :, 1:3])
     coords_loss = coords_loss.sum(dim=2)
     loss =  penup_weighting*penup_loss + (1-penup_weighting)*coords_loss
     loss = loss.masked_select(target_mask)
@@ -79,14 +78,14 @@ def train(
                 with torch.no_grad():
                     model.eval()
                     sample = model.sample()
-                    f = utils.plot_stroke(sample[:, 0].to("cpu"))
+                    f = utils.plot_stroke(sample[:, 0].to("cpu"), "xyz.png")
                     writer.add_figure(f"sample, bias: 0", figure=f, global_step=iteration)
                     model.train()
 
             pbar.postfix = f": Loss: {loss.item():.4f}"
-
-            pbar.postfix = f": Loss: {loss.item():.4f}"
             pbar.update()
+
+    torch.save(model.state_dict(), save_path / "model.pt")
     print(f"mean iteration time: {torch.tensor(iteration_times).mean():.4f}")
 
     # evaluation
@@ -94,7 +93,7 @@ def train(
         model.eval()
         for bias in [0, .1, .5, 2, 5, 10]:
             sample = model.sample(bias=bias)
-            f = utils.plot_stroke(sample[:, 0].to("cpu"))
+            f = utils.plot_stroke(sample[:, 0].to("cpu"), "xyz.png")
             writer.add_figure(f"sample, bias: {bias}", f, global_step=num_training_iterations)
         # for some reason, last added figure never shows up
         writer.add_figure(f"sacrificial figure", f)

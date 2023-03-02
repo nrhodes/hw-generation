@@ -37,20 +37,18 @@ class Scribe(nn.Module):
         output = []
         for i in range(num_steps):
             x, hidden = self.step(x, hidden)
+            # Bias is weird now because we have a fixed stddev.  Instead of using bias, we could
+            # just adjust stddev.
+            #
+            # However, in the future, log-stddev will be part of the output of the model, and so it makes sense
+            # to apply bias independently.
+            zeros = torch.zeros(batch_size, 2).to(self.device)
+            std = torch.exp(torch.log(zeros + stddev) - bias)
+            noise = torch.normal(mean=zeros, std=std)
+            x[0, :, 1:3] += noise
+            x[0, :, 0:1] = torch.sigmoid(x[0, :, 0:1]) > torch.rand((batch_size, 1)).to(self.device)
             output.append(x)
-        output = torch.vstack(output)
-        zeros = torch.zeros(num_steps, batch_size, 2).to(self.device)
-
-        # Bias is weird now because we have a fixed stddev.  Instead of using bias, we could
-        # just adjust stddev.
-        #
-        # However, in the future, log-stddev will be part of the output of the model, and so it makes sense
-        # to apply bias independently.
-        std = torch.exp(torch.log(zeros + stddev) - bias)
-        noise = torch.normal(mean=zeros, std=std)
-        output[:, :, 1:3] += noise
-        output[:, :, 0:1] = torch.sigmoid(output[:, :, 0:1]) > torch.rand((num_steps, batch_size, 1)).to(self.device)
-        return output
+        return torch.vstack(output)
 
 
 
