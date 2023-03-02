@@ -27,7 +27,7 @@ def collate_fn(samples):
 
 class HandwritingDataset(Dataset):
     @argbind.bind(without_prefix=True)
-    def __init__(self, is_validation=False, validation_percentage=.1, data_dir=Path('./descript-research-test/data')):
+    def __init__(self, is_validation=False, val_proportion=.1, data_dir=Path('./descript-research-test/data')):
         super().__init__()
         self.strokes = np.load(data_dir / 'strokes-py3.npy', allow_pickle=True)
         sents = (data_dir / 'sentences.txt').read_text().splitlines()
@@ -39,7 +39,7 @@ class HandwritingDataset(Dataset):
 
         self.sentences = [self.text2code(s) for s in sents]
 
-        num_validation = math.floor(len(self.strokes) * validation_percentage)
+        num_validation = math.floor(len(self.strokes) * val_proportion)
         if num_validation > 0:
             if is_validation:
                 self.sentences = self.sentences[-num_validation:]
