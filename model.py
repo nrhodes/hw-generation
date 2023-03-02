@@ -11,9 +11,9 @@ import utils
 
 class Scribe(nn.Module):
     @argbind.bind(without_prefix=True)
-    def __init__(self, input_size=3, hidden_size=20, output_size=3):
+    def __init__(self, input_size=3, hidden_size=20, num_layers=1, output_size=3):
         super(Scribe, self).__init__()
-        self.rnn = nn.GRU(input_size=input_size, hidden_size=hidden_size, num_layers=1)
+        self.rnn = nn.GRU(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers)
         self.linear = nn.Linear(in_features=hidden_size, out_features=output_size)
 
     def forward(self, strokes):
@@ -31,16 +31,25 @@ class Scribe(nn.Module):
         return next(self.parameters()).device
 
     @argbind.bind
-    def sample(self, batch_size=1, num_steps=100, bias=0.0):
-        x = torch.zeros(1, batch_size, 3).to(self.device)
+    def sample(self, batch_size=1, num_steps=100, bias=0.0, stddev=0.1):
+        sample = torch.zeros(1, batch_size, 3, device=self.device)
         hidden = None
         output = []
         for i in range(num_steps):
-            x, hidden = self.step(x, hidden)
-            output.append(x)
+            x, hidden = self.step(sample, hidden)
+            # Bias is weird now because we have a fixed stddev.  Instead of using bias, we could
+            # just adjust stddev.
+            #
+            # However, in the future, log-stddev will be part of the output of the model, and so it makes sense
+            # to apply bias independently.
+            zeros = torch.zeros(batch_size, 2, device=self.device)
+            std = torch.exp(torch.log(zeros + stddev) - bias)
+            noise = torch.normal(mean=zeros, std=std)
+            coords = x[:, :, 1:3] + noise
+            penup = torch.sigmoid(x[:, :, 0:1]) > torch.rand((1, batch_size, 1)).to(self.device)
+            sample = torch.cat((penup, coords), dim=2)
+            output.append(sample)
         return torch.vstack(output)
-
-
 
 
 
@@ -50,6 +59,7 @@ def main(show_strokes=True, show_output=False, show_samples=False):
     dl = DataLoader(dataset, shuffle=True, batch_size=4, collate_fn=data.collate_fn)
     texts, texts_mask, strokes, strokes_mask = next(iter(dl))
 
+    # TODO: Apply mask to strokes
     model = Scribe()
 
     with torch.no_grad():
