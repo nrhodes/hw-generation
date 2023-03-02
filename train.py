@@ -14,17 +14,20 @@ import utils
 from model import Scribe
 
 
-@argbind.bind
-def scribe_loss(prediction, target, target_mask, penup_weighting=.5):
-    mse_loss = torch.nn.MSELoss(reduction='none')
-    bce_loss = torch.nn.BCEWithLogitsLoss(reduction='none')
+class ScribeLoss:
+    @argbind.bind
+    def __init__(self, penup_weighting=.5):
+        self.penup_weighting = penup_weighting
+        self.mse_loss = torch.nn.MSELoss(reduction='none')
+        self.bce_loss = torch.nn.BCEWithLogitsLoss(reduction='none')
 
-    penup_loss = bce_loss(prediction[:, :, 0:1], target[:, :, 0:1]).squeeze()
-    coords_loss = mse_loss(prediction[:, :, 1:3], target[:, :, 1:3])
-    coords_loss = coords_loss.sum(dim=2)
-    loss =  penup_weighting*penup_loss + (1-penup_weighting)*coords_loss
-    loss = loss.masked_select(target_mask)
-    return loss.mean()
+    def __call__(self, prediction, target, target_mask, penup_weighting=.5):
+        penup_loss = self.bce_loss(prediction[:, :, 0:1], target[:, :, 0:1]).squeeze()
+        coords_loss = self.mse_loss(prediction[:, :, 1:3], target[:, :, 1:3])
+        coords_loss = coords_loss.sum(dim=2)
+        loss =  penup_weighting*penup_loss + (1-penup_weighting)*coords_loss
+        loss = loss.masked_select(target_mask)
+        return loss.mean()
 
 
 @argbind.bind(without_prefix=True)
@@ -49,11 +52,13 @@ def train(
         print(f"Setting random seed: {random_seed}")
         torch.manual_seed(random_seed)
     dataset = data.HandwritingDataset()
-    dl = DataLoader(dataset, shuffle=True, batch_size=batch_size, collate_fn=data.collate_fn)
+    collate_fn = data.CollateFn(device)
+    dl = DataLoader(dataset, shuffle=True, batch_size=batch_size, collate_fn=collate_fn)
     dl = utils.infinite_dl(dl)
 
     model = Scribe()
     model = model.to(device)
+    scribe_loss = ScribeLoss()
 
     optimizer = optim.Adam(model.parameters())
 
@@ -65,12 +70,12 @@ def train(
                 break
             optimizer.zero_grad()
             start = time.time()
-            strokes = strokes.to(device)
+            strokes = strokes
             output = model(strokes)
             iteration_times.append(time.time() - start)
 
             # output[:-1] is the prediction, strokes[1:] is the ground truth
-            loss = scribe_loss(output[:-1], strokes[1:], strokes_mask[1:].to(device))
+            loss = scribe_loss(output[:-1], strokes[1:], strokes_mask[1:])
             writer.add_scalar('Loss/train', loss.item(), iteration)
             loss.backward()
             optimizer.step()
