@@ -29,19 +29,42 @@ class CollateFn:
 
         return all_texts, texts_mask, all_strokes, strokes_mask
 
-class HandwritingDataset(Dataset):
+class Data:
     @argbind.bind(without_prefix=True)
-    def __init__(self, is_validation=False, val_proportion=.1, data_dir=Path('./descript-research-test/data')):
-        super().__init__()
+    def __init__(self,data_dir=Path('./descript-research-test/data')):
         self.strokes = np.load(data_dir / 'strokes-py3.npy', allow_pickle=True)
-        sents = (data_dir / 'sentences.txt').read_text().splitlines()
-        assert len(sents) == len(self.strokes)
+        self.sents = (data_dir / 'sentences.txt').read_text().splitlines()
+        assert len(self.sents) == len(self.strokes)
 
         # 0 maps to empty character
-        self.itoc = [''] + sorted(list({c for s in sents for c in s}))
+        self.itoc = [''] + sorted(list({c for s in self.sents for c in s}))
         self.ctoi = {c: i for i, c in enumerate(self.itoc)}
 
-        self.sentences = [self.text2code(s) for s in sents]
+    def text2code(self, s):
+        return np.array([self.ctoi[c] for c in s], dtype=np.int32)
+
+    def numCharacters(self):
+        return len(self.ctoi)
+
+    def code2text(self, s):
+        return ''.join([self.itoc[i] for i in np.nditer(s)])
+
+    def getSentences(self):
+       return [self.text2code(s) for s in self.sents]
+
+    def getStrokes(self):
+       return self.strokes
+
+
+class HandwritingDataset(Dataset):
+    @argbind.bind(without_prefix=True)
+    def __init__(self, is_validation=False, val_proportion=.1):
+        super().__init__()
+
+        self.data = Data()
+
+        self.sentences = self.data.getSentences()
+        self.strokes = self.data.getStrokes()
 
         num_validation = math.floor(len(self.strokes) * val_proportion)
         if num_validation > 0:
@@ -52,27 +75,16 @@ class HandwritingDataset(Dataset):
                 self.sentences = self.sentences[:-num_validation]
                 self.strokes = self.strokes[:-num_validation]
 
-    def char2index(self, ch):
-        index = self.CHARSET.find(ch)
-        if index < 0:
-            index = len(self.CHARSET)
-        return index + 1
 
-    def index2char(self, i):
-        # index of 0 is treated as empty character. Implicitly masked
-        if i == 0:
-            return ''
-        i = i - 1
-        if i < len(self.CHARSET):
-            return self.CHARSET[i]
-        else:
-            return '?'
 
     def text2code(self, s):
-        return np.array([self.ctoi[c] for c in s], dtype=np.int8)
+        return self.data.text2code(s)
+
+    def numCharacters(self):
+        return self.data.numCharacters()
 
     def code2text(self, s):
-        return ''.join([self.itoc[i] for i in np.nditer(s)])
+        return self.data.code2text(s)
 
     def __len__(self):
         return len(self.strokes)

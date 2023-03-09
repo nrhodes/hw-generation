@@ -60,6 +60,8 @@ def train(
     model = model.to(device)
     scribe_loss = ScribeLoss()
 
+    prompt = "hello"
+
     optimizer = optim.Adam(model.parameters())
 
     iteration_times = []
@@ -71,7 +73,8 @@ def train(
             optimizer.zero_grad()
             start = time.time()
             strokes = strokes
-            output = model(strokes)
+            output = model(strokes, texts, texts_mask)
+
             iteration_times.append(time.time() - start)
 
             # output[:-1] is the prediction, strokes[1:] is the ground truth
@@ -82,7 +85,7 @@ def train(
             if (iteration % 100) == 0:
                 with torch.no_grad():
                     model.eval()
-                    sample = model.sample()
+                    sample = model.sample(prompt)
                     f = utils.plot_stroke(sample[:, 0].to("cpu"), "xyz.png")
                     writer.add_figure(f"sample, bias: 0", figure=f, global_step=iteration)
                     model.train()
@@ -97,7 +100,7 @@ def train(
     with torch.no_grad():
         model.eval()
         for bias in [0, .1, .5, 2, 5, 10]:
-            sample = model.sample(bias=bias)
+            sample = model.sample(prompt, bias=bias)
             f = utils.plot_stroke(sample[:, 0].to("cpu"), "xyz.png")
             writer.add_figure(f"sample, bias: {bias}", f, global_step=num_training_iterations)
         # for some reason, last added figure never shows up
