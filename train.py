@@ -14,22 +14,6 @@ import utils
 from model import Scribe
 
 
-class ScribeLoss:
-    @argbind.bind
-    def __init__(self, penup_weighting=.5):
-        self.penup_weighting = penup_weighting
-        self.mse_loss = torch.nn.MSELoss(reduction='none')
-        self.bce_loss = torch.nn.BCEWithLogitsLoss(reduction='none')
-
-    def __call__(self, prediction, target, target_mask, penup_weighting=.5):
-        penup_loss = self.bce_loss(prediction[:, :, 0:1], target[:, :, 0:1]).squeeze()
-        coords_loss = self.mse_loss(prediction[:, :, 1:3], target[:, :, 1:3])
-        coords_loss = coords_loss.sum(dim=2)
-        loss =  penup_weighting*penup_loss + (1-penup_weighting)*coords_loss
-        loss = loss.masked_select(target_mask)
-        return loss.mean()
-
-
 @argbind.bind(without_prefix=True)
 def train(
         save_path: Path = Path('runs') / datetime.now().isoformat(),
@@ -58,7 +42,6 @@ def train(
 
     model = Scribe(dataset)
     model = model.to(device)
-    scribe_loss = ScribeLoss()
 
     prompt = "hello"
 
@@ -78,7 +61,7 @@ def train(
             iteration_times.append(time.time() - start)
 
             # output[:-1] is the prediction, strokes[1:] is the ground truth
-            loss = scribe_loss(output[:-1], strokes[1:], strokes_mask[1:])
+            loss = model.get_scribe_loss(output[:-1], strokes[1:], strokes_mask[1:])
             writer.add_scalar('Loss/train', loss.item(), iteration)
             loss.backward()
             optimizer.step()
