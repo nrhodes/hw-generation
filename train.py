@@ -68,9 +68,9 @@ def train(
             if (iteration % 100) == 0:
                 with torch.no_grad():
                     model.eval()
-                    sample = model.sample(prompt)
+                    sample = model.sample(prompt, bias=3)
                     f = utils.plot_stroke(sample[:, 0].to("cpu"), "xyz.png")
-                    writer.add_figure(f"sample, bias: 0", figure=f, global_step=iteration)
+                    writer.add_figure(f"sample, bias: 3", figure=f, global_step=iteration)
                     model.train()
 
             pbar.postfix = f": Loss: {loss.item():.4f}"
