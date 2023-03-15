@@ -10,10 +10,9 @@ import utils
 
 
 class GaussianAttention(nn.Module):
-    def __init__(self, query_size=5, use_position=True):
+    def __init__(self, query_size=5):
         super(GaussianAttention, self).__init__()
         self.linear = nn.Linear(in_features=query_size, out_features=2)
-        self.use_position=use_position
 
     def forward(self, query, textEmbedding, text_mask, position):
         """query should be of shape [seq_len, batch_size, query_size]]
@@ -33,8 +32,7 @@ class GaussianAttention(nn.Module):
         assert query_result.shape == (seq_len, batch_size, 2)
         assert textEmbedding.shape[1] == batch_size
         mean, std = query_result.unbind(dim=-1)
-        if self.use_position:
-            mean = position + mean.cumsum(dim=0)/20
+        mean = position + mean.cumsum(dim=0)/20
         weights = torch.zeros((seq_len, textEmbedding.shape[0], batch_size, 1), device=query.device)
         # TODO(neil): Why these extra dimensions with value?
         indices = torch.arange(0, textEmbedding.shape[0], device=query.device).view(1, textEmbedding.shape[0], 1, 1)
@@ -47,15 +45,15 @@ class GaussianAttention(nn.Module):
 class Scribe(nn.Module):
     @argbind.bind(without_prefix=True)
     # TODO(neil): Update num_embeddings from data
-    def __init__(self, input_size=3, hidden_size=20, num_layers=1, output_size=3, num_embeddings=100, use_position=1):
+    def __init__(self, input_size=3, hidden_size=20, output_size=3, num_embeddings=100):
         super(Scribe, self).__init__()
         self.embedding_dim = 10
         self.embedding = nn.Embedding(num_embeddings=num_embeddings, embedding_dim=self.embedding_dim)
         self.hidden_size = hidden_size
-        self.rnn1 = nn.GRU(input_size=input_size, hidden_size=hidden_size, num_layers=1)
-        self.rnn2 = nn.GRU(input_size=hidden_size+self.embedding_dim, hidden_size=hidden_size, num_layers=max(1, num_layers-1))
+        self.rnn1 = nn.GRU(input_size=input_size, hidden_size=hidden_size)
+        self.rnn2 = nn.GRU(input_size=hidden_size+self.embedding_dim, hidden_size=hidden_size)
         self.linear = nn.Linear(in_features=hidden_size, out_features=output_size)
-        self.attention = GaussianAttention(query_size=hidden_size,use_position=use_position == 1)
+        self.attention = GaussianAttention(query_size=hidden_size)
         self.textConverter = data.Data()
 
 
