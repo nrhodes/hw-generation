@@ -29,16 +29,30 @@ class CollateFn:
 
         return all_texts, texts_mask, all_strokes, strokes_mask
 
-class Data:
+
+class HandwritingDataset(Dataset):
     @argbind.bind(without_prefix=True)
-    def __init__(self,data_dir=Path('./descript-research-test/data')):
+    def __init__(self, data_dir=Path('./descript-research-test/data'), is_validation=False, val_proportion=.1):
+        super().__init__()
+
         self.strokes = np.load(data_dir / 'strokes-py3.npy', allow_pickle=True)
-        self.sents = (data_dir / 'sentences.txt').read_text().splitlines()
-        assert len(self.sents) == len(self.strokes)
+        sentences = (data_dir / 'sentences.txt').read_text().splitlines()
+        assert len(sentences) == len(self.strokes)
 
         # 0 maps to empty character
-        self.itoc = [''] + sorted(list({c for s in self.sents for c in s}))
+        self.itoc = [''] + sorted(list({c for s in sentences for c in s}))
         self.ctoi = {c: i for i, c in enumerate(self.itoc)}
+
+        self.sentences = [self.text2code(s) for s in sentences]
+
+        num_validation = math.floor(len(self.strokes) * val_proportion)
+        if num_validation > 0:
+            if is_validation:
+                self.sentences = self.sentences[-num_validation:]
+                self.strokes = self.strokes[-num_validation:]
+            else:
+                self.sentences = self.sentences[:-num_validation]
+                self.strokes = self.strokes[:-num_validation]
 
     def text2code(self, s):
         return np.array([self.ctoi[c] for c in s], dtype=np.int32)
@@ -50,41 +64,7 @@ class Data:
         return ''.join([self.itoc[i] for i in np.nditer(s)])
 
     def getSentences(self):
-       return [self.text2code(s) for s in self.sents]
-
-    def getStrokes(self):
-       return self.strokes
-
-
-class HandwritingDataset(Dataset):
-    @argbind.bind(without_prefix=True)
-    def __init__(self, is_validation=False, val_proportion=.1):
-        super().__init__()
-
-        self.data = Data()
-
-        self.sentences = self.data.getSentences()
-        self.strokes = self.data.getStrokes()
-
-        num_validation = math.floor(len(self.strokes) * val_proportion)
-        if num_validation > 0:
-            if is_validation:
-                self.sentences = self.sentences[-num_validation:]
-                self.strokes = self.strokes[-num_validation:]
-            else:
-                self.sentences = self.sentences[:-num_validation]
-                self.strokes = self.strokes[:-num_validation]
-
-
-
-    def text2code(self, s):
-        return self.data.text2code(s)
-
-    def numCharacters(self):
-        return self.data.numCharacters()
-
-    def code2text(self, s):
-        return self.data.code2text(s)
+       return [self.text2code(s) for s in self.sentences]
 
     def __len__(self):
         return len(self.strokes)

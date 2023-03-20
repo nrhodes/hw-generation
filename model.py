@@ -14,7 +14,7 @@ class GaussianAttention(nn.Module):
         super(GaussianAttention, self).__init__()
         self.linear = nn.Linear(in_features=query_size, out_features=2)
 
-    def forward(self, query, textEmbedding, text_mask, position):
+    def forward(self, query, embedded_text, text_mask, position):
         """query should be of shape [seq_len, batch_size, query_size]]
         textEmbedding should be of shape [text_len, batch_size]
         text_mask should be of shape [text_len, batch_size]
@@ -23,19 +23,20 @@ class GaussianAttention(nn.Module):
           * a tensor of shape [seq_len, batch_size, embedding_dim]
           * a tensor of shape [seq_len, batch_size] containing positions."""
         # TODO(neil): rewrite so that we don't need seq_len leading dimension
-        maskedEmbedding = textEmbedding * text_mask.unsqueeze(-1)
+        maskedEmbedding = embedded_text * text_mask.unsqueeze(-1)
         seq_len = query.shape[0]
         batch_size = query.shape[1]
         if position is None:
             position = torch.zeros((seq_len, batch_size), device=query.device)
         query_result = torch.exp(self.linear(query))
         assert query_result.shape == (seq_len, batch_size, 2)
-        assert textEmbedding.shape[1] == batch_size
+        assert embedded_text.shape[1] == batch_size
         mean, std = query_result.unbind(dim=-1)
+
+        # We divide by 20 because avg number of strokes/character is 20.
         mean = position + mean.cumsum(dim=0)/20
-        weights = torch.zeros((seq_len, textEmbedding.shape[0], batch_size, 1), device=query.device)
         # TODO(neil): Why these extra dimensions with value?
-        indices = torch.arange(0, textEmbedding.shape[0], device=query.device).view(1, textEmbedding.shape[0], 1, 1)
+        indices = torch.arange(0, embedded_text.shape[0], device=query.device).view(1, embedded_text.shape[0], 1, 1)
         weights = torch.exp(-std.view(seq_len, 1, batch_size, 1) * (mean.view(seq_len, 1, batch_size, 1) - indices) ** 2)
         weightedSum = maskedEmbedding * weights
         newContext = weightedSum.sum(dim=1)
@@ -45,37 +46,37 @@ class GaussianAttention(nn.Module):
 class Scribe(nn.Module):
     @argbind.bind(without_prefix=True)
     # TODO(neil): Update num_embeddings from data
-    def __init__(self, input_size=3, hidden_size=20, output_size=3, num_embeddings=100):
+    def __init__(self, dataset, input_size=3, hidden_size=20, output_size=3):
         super(Scribe, self).__init__()
         self.embedding_dim = 10
-        self.embedding = nn.Embedding(num_embeddings=num_embeddings, embedding_dim=self.embedding_dim)
+        self.dataset = dataset
+        self.embedding = nn.Embedding(num_embeddings=dataset.numCharacters(), embedding_dim=self.embedding_dim)
         self.hidden_size = hidden_size
         self.rnn1 = nn.GRU(input_size=input_size, hidden_size=hidden_size)
         self.rnn2 = nn.GRU(input_size=hidden_size+self.embedding_dim, hidden_size=hidden_size)
         self.linear = nn.Linear(in_features=hidden_size, out_features=output_size)
         self.attention = GaussianAttention(query_size=hidden_size)
-        self.textConverter = data.Data()
 
 
     def forward(self, strokes, texts, textsmask):
         hidden = None
-        textEmbedding = self.embedding(texts)
-        output, hidden = self.step(strokes, textEmbedding, textsmask, hidden)
+        embedded_text = self.embedding(texts)
+        output, hidden = self.step(strokes, embedded_text, textsmask, hidden)
         return output
 
-    def step(self, x, textEmbedding, textsmask, hidden):
+    def step(self, x, embedded_text, textsmask, hidden):
         if hidden is None:
             hidden1 = None
-            positions = None
-            hidden3 = None
+            previous_position = None
+            hidden2 = None
         else:
-            hidden1, positions, hidden3 = hidden
+            hidden1, previous_position, hidden2 = hidden
         o1, hidden1 = self.rnn1(x, hidden1)
-        context, positions = self.attention(o1, textEmbedding, textsmask, positions)
-        o2, hidden3 = self.rnn2(torch.cat((o1, context), dim=-1), hidden3)
+        context, previous_position = self.attention(o1, embedded_text, textsmask, previous_position)
+        o2, hidden2 = self.rnn2(torch.cat((o1, context), dim=-1), hidden2)
         output = self.linear(o2)
 
-        result = output, (hidden1, positions, hidden3)
+        result = output, (hidden1, previous_position, hidden2)
         return result
 
     @property
@@ -84,8 +85,12 @@ class Scribe(nn.Module):
 
     @argbind.bind
     def sample(self, promptStr, num_steps=120, bias=0.0, stddev=0.1):
+        def sample_from_distribution(mean, std_logits):
+            std = torch.exp(std_logits - bias)
+            return torch.normal(mean=mean, std=std)
+
         batch_size = 1
-        promptEmbedding = self.embedding(torch.tensor(self.textConverter.text2code(promptStr), device=self.device).unsqueeze(dim=1))
+        promptEmbedding = self.embedding(torch.tensor(self.dataset.text2code(promptStr), device=self.device).unsqueeze(dim=1))
         promptMask = torch.ones((len(promptStr), 1), device=self.device)
         sample = torch.zeros(1, batch_size, 3, device=self.device)
         hidden = None
@@ -93,9 +98,6 @@ class Scribe(nn.Module):
         output = []
         for _ in range(num_steps):
             x, hidden = self.step(sample, promptEmbedding, promptMask, hidden)
-            def sample_from_distribution(mean, std_logits):
-                std = torch.exp(std_logits - bias)
-                return torch.normal(mean=mean, std=std)
 
             mean = x[:, :, 1:3]
             coords = sample_from_distribution(mean, stddev)
@@ -113,7 +115,7 @@ def main(show_strokes=True, show_output=False, show_samples=False):
     texts, texts_mask, strokes, strokes_mask = next(iter(dl))
 
     # TODO: Apply mask to strokes
-    model = Scribe()
+    model = Scribe(dataset)
 
     with torch.no_grad():
         model.eval()

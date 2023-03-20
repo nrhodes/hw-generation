@@ -56,7 +56,7 @@ def train(
     dl = DataLoader(dataset, shuffle=True, batch_size=batch_size, collate_fn=collate_fn)
     dl = utils.infinite_dl(dl)
 
-    model = Scribe()
+    model = Scribe(dataset)
     model = model.to(device)
     scribe_loss = ScribeLoss()
 
