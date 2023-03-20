@@ -23,7 +23,7 @@ class GaussianAttention(nn.Module):
           * a tensor of shape [seq_len, batch_size, embedding_dim]
           * a tensor of shape [seq_len, batch_size] containing positions."""
         # TODO(neil): rewrite so that we don't need seq_len leading dimension
-        maskedEmbedding = embedded_text * text_mask.unsqueeze(-1)
+        masked_embedding = embedded_text * text_mask.unsqueeze(-1)
         seq_len = query.shape[0]
         batch_size = query.shape[1]
         if position is None:
@@ -38,10 +38,10 @@ class GaussianAttention(nn.Module):
         # TODO(neil): Why these extra dimensions with value?
         indices = torch.arange(0, embedded_text.shape[0], device=query.device).view(1, embedded_text.shape[0], 1, 1)
         weights = torch.exp(-std.view(seq_len, 1, batch_size, 1) * (mean.view(seq_len, 1, batch_size, 1) - indices) ** 2)
-        weightedSum = maskedEmbedding * weights
-        newContext = weightedSum.sum(dim=1)
+        weightedSum = masked_embedding * weights
+        new_context = weightedSum.sum(dim=1)
 
-        return newContext, mean
+        return new_context, mean
 
 class Scribe(nn.Module):
     @argbind.bind(without_prefix=True)
@@ -90,14 +90,14 @@ class Scribe(nn.Module):
             return torch.normal(mean=mean, std=std)
 
         batch_size = 1
-        promptEmbedding = self.embedding(torch.tensor(self.dataset.text2code(promptStr), device=self.device).unsqueeze(dim=1))
-        promptMask = torch.ones((len(promptStr), 1), device=self.device)
+        embedded_prompt = self.embedding(torch.tensor(self.dataset.text2code(promptStr), device=self.device).unsqueeze(dim=1))
+        prompt_mask = torch.ones((len(promptStr), 1), device=self.device)
         sample = torch.zeros(1, batch_size, 3, device=self.device)
         hidden = None
         stddev = torch.log(torch.tensor([stddev, stddev]).view(1, batch_size, 2).to(self.device))
         output = []
         for _ in range(num_steps):
-            x, hidden = self.step(sample, promptEmbedding, promptMask, hidden)
+            x, hidden = self.step(sample, embedded_prompt, prompt_mask, hidden)
 
             mean = x[:, :, 1:3]
             coords = sample_from_distribution(mean, stddev)
