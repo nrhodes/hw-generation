@@ -156,7 +156,7 @@ class Scribe(nn.Module):
         o1, hidden1 = self.rnn1(x, hidden1)
         context, previous_position = self.attention(o1, embedded_text, textsmask, previous_position)
         o2, hidden2 = self.rnn2(torch.cat((o1, context), dim=-1), hidden2)
-        output = self.linear(o2)
+        output = self.mixture_layer(o2)
 
         result = output, (hidden1, previous_position, hidden2)
         return result
@@ -167,10 +167,6 @@ class Scribe(nn.Module):
 
     @argbind.bind
     def sample(self, promptStr, num_steps=120, bias=0.0, stddev=0.1):
-        def sample_from_distribution(mean, std_logits):
-            std = torch.exp(std_logits - bias)
-            return torch.normal(mean=mean, std=std)
-
         batch_size = 1
         embedded_prompt = self.embedding(torch.tensor(self.dataset.text2code(promptStr), device=self.device).unsqueeze(dim=1))
         prompt_mask = torch.ones((len(promptStr), 1), device=self.device)
