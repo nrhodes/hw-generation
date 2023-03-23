@@ -45,12 +45,12 @@ class GaussianAttention(nn.Module):
         return new_context, mean
 
 class MixtureLayer(nn.Module):
-    def __init__(self, num_inputs, num_mixtures=3, penup_weighting=0.5):
+    def __init__(self, num_inputs, num_mixtures=3, epsilon=1e-6):
         super(MixtureLayer, self).__init__()
         self.num_mixtures = num_mixtures
         self.linear = nn.Linear(in_features=num_inputs, out_features=1+5*num_mixtures)
         self.bce_loss = torch.nn.BCEWithLogitsLoss(reduction='none')
-        self.penup_weighting = penup_weighting
+        self.epsilon = epsilon
 
     def forward(self, x):
         # [:, :, 0:1] param is penup logit
@@ -95,7 +95,7 @@ class MixtureLayer(nn.Module):
         sample = torch.cat((penup, coord1, coord2), dim=-1)
         return sample
 
-    def get_scribe_loss(self, prediction, target, target_mask=None, epsilon=1e-6):
+    def get_scribe_loss(self, prediction, target, target_mask=None):
         penup, log_weights, means, log_std, rho = self.get_distribution_parameters(prediction)
         target_penup, x, y = target.unbind(-1)
         #print(f"{target_penup=}")
@@ -104,8 +104,8 @@ class MixtureLayer(nn.Module):
 
         mu1, mu2 = means.unbind(-1)
         logstd1, logstd2 = log_std.unbind(-1)
-        std1 = torch.exp(logstd1) + epsilon
-        std2 = torch.exp(logstd2) + epsilon
+        std1 = torch.exp(logstd1) + self.epsilon
+        std2 = torch.exp(logstd2) + self.epsilon
 
         x = x.unsqueeze(-1)
         y = y.unsqueeze(-1)
@@ -113,12 +113,12 @@ class MixtureLayer(nn.Module):
         frac1 = (x - mu1)/std1
         frac2 = (y - mu2)/std2
         Z = frac1**2 + frac2**2- 2*rho*frac1*frac2
-        logN = -Z/2*(1-rho) - torch.log(torch.tensor([2*math.pi], device=x.device)) - logstd1 - logstd2 -0.5 * torch.log(1-rho**2 + epsilon)
+        logN = -Z/2*(1-rho**2 + self.epsilon) - torch.log(torch.tensor([2*math.pi], device=x.device)) - logstd1 - logstd2 -0.5 * torch.log(1-rho**2 + self.epsilon)
 
         log_coords_loss = -torch.logsumexp(logN + log_weights, dim=-1)
         log_coords_loss = log_coords_loss.masked_select(target_mask).mean()
 
-        loss =  self.penup_weighting*penup_loss + (1-self.penup_weighting)*log_coords_loss
+        loss =  penup_loss + log_coords_loss
         return loss
 
 
