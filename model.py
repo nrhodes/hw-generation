@@ -4,6 +4,7 @@ import argbind
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributions.bernoulli import Bernoulli
 from torch.utils.data import DataLoader
 
 import data
@@ -48,7 +49,12 @@ class MixtureLayer(nn.Module):
     def __init__(self, num_inputs, num_mixtures=3, epsilon=1e-6):
         super(MixtureLayer, self).__init__()
         self.num_mixtures = num_mixtures
-        self.linear = nn.Linear(in_features=num_inputs, out_features=1+5*num_mixtures)
+        out_features = 1 + (# penup
+                     num_mixtures * (1 + # mixture weights
+                         2 + # x/y
+                         2 + # stddevs
+                         1))   # rho (correlation)
+        self.linear = nn.Linear(in_features=num_inputs, out_features=out_features)
         self.bce_loss = torch.nn.BCEWithLogitsLoss(reduction='none')
         self.epsilon = epsilon
 
@@ -61,7 +67,7 @@ class MixtureLayer(nn.Module):
         return self.linear(x)
 
     def get_distribution_parameters(self, x):
-        penup, log_weights, means, log_std =  x.split([1, self.num_mixtures, 2*self.num_mixtures, 2*self.num_mixtures], dim=-1)
+        penup_logits, log_weights, means, log_std, rho =  x.split([1, self.num_mixtures, 2*self.num_mixtures, 2*self.num_mixtures, 1*self.num_mixtures], dim=-1)
 
         means = means.view(means.shape[:-1] + (self.num_mixtures, 2))
         log_std = log_std.view(log_std.shape[:-1] + (self.num_mixtures, 2))
@@ -69,11 +75,11 @@ class MixtureLayer(nn.Module):
 
         # Hardcode rho to 0 until I figure out how to sample correctly
         rho = torch.zeros(means.shape[:-1], device=means.device)
-        penup = torch.sigmoid(penup)
-        return penup, log_weights, means, log_std, rho
+        #rho = torch.tanh(rho) * (1 - self.epsilon)
+        return penup_logits, log_weights, means, log_std, rho
 
     def get_sample(self, x, bias=10):
-        penup_prob, log_weights, means, log_std, rho = self.get_distribution_parameters(x)
+        penup_logits, log_weights, means, log_std, rho = self.get_distribution_parameters(x)
 
         weights = torch.softmax(torch.exp(log_weights*(1+bias)), dim=-1).squeeze(dim=0)
         which_mixture = torch.multinomial(weights, 1).squeeze(0)
@@ -91,15 +97,15 @@ class MixtureLayer(nn.Module):
         rand2 = torch.randn_like(mu2)
         coord1 = rand1 * std1 + mu1
         coord2 = rand2 * std2 + mu2
-        penup = penup_prob.bernoulli()
+        penup = Bernoulli(logits=penup_logits).sample()
         sample = torch.cat((penup, coord1, coord2), dim=-1)
         return sample
 
     def get_scribe_loss(self, prediction, target, target_mask=None):
-        penup, log_weights, means, log_std, rho = self.get_distribution_parameters(prediction)
+        penup_logits, log_weights, means, log_std, rho = self.get_distribution_parameters(prediction)
         target_penup, x, y = target.unbind(-1)
         #print(f"{target_penup=}")
-        penup_loss = F.binary_cross_entropy(penup.squeeze(-1), target_penup)
+        penup_loss = F.binary_cross_entropy_with_logits(penup_logits.squeeze(-1), target_penup)
         penup_loss = penup_loss.masked_select(target_mask).mean()
 
         mu1, mu2 = means.unbind(-1)
@@ -113,7 +119,7 @@ class MixtureLayer(nn.Module):
         frac1 = (x - mu1)/std1
         frac2 = (y - mu2)/std2
         Z = frac1**2 + frac2**2- 2*rho*frac1*frac2
-        logN = -Z/2*(1-rho**2 + self.epsilon) - torch.log(torch.tensor([2*math.pi], device=x.device)) - logstd1 - logstd2 -0.5 * torch.log(1-rho**2 + self.epsilon)
+        logN = -Z/2*(1-rho**2) - torch.log(torch.tensor([2*torch.pi], device=x.device)) - logstd1 - logstd2 -0.5 * torch.log(1-rho**2)
 
         log_coords_loss = -torch.logsumexp(logN + log_weights, dim=-1)
         log_coords_loss = log_coords_loss.masked_select(target_mask).mean()
