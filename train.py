@@ -5,6 +5,8 @@ from pathlib import Path
 import argbind
 import torch
 import torch.optim as optim
+from accelerate import Accelerator
+from torch.optim.lr_scheduler import ExponentialLR
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -20,6 +22,7 @@ def train(
         num_training_iterations: int = 1000,
         batch_size: int = 40,
         device: str = "cpu",
+        max_lr: float = 1e-3,
         random_seed: int = None):
 
     """Trains model, samples an output, and displays it
@@ -36,16 +39,20 @@ def train(
         print(f"Setting random seed: {random_seed}")
         torch.manual_seed(random_seed)
     dataset = data.HandwritingDataset()
-    collate_fn = data.CollateFn(device)
-    dl = DataLoader(dataset, shuffle=True, batch_size=batch_size, collate_fn=collate_fn)
-    dl = utils.infinite_dl(dl)
+    dl = DataLoader(dataset, shuffle=True, batch_size=batch_size, collate_fn=data.CollateFn)
 
     model = Scribe(dataset)
-    model = model.to(device)
+    accelerator = Accelerator()
 
     prompt = "hello"
 
     optimizer = optim.Adam(model.parameters())
+
+    scheduler = ExponentialLR(optimizer, gamma=1.0)
+    model, optimizer, dl, scheduler = accelerator.prepare(
+        model, optimizer, dl, scheduler
+    )
+    dl = utils.infinite_dl(dl)
 
     iteration_times = []
     with tqdm(total=num_training_iterations) as pbar:
@@ -63,7 +70,7 @@ def train(
             # output[:-1] is the prediction, strokes[1:] is the ground truth
             loss = model.get_scribe_loss(output[:-1], strokes[1:], strokes_mask[1:])
             writer.add_scalar('Loss/train', loss.item(), iteration)
-            loss.backward()
+            accelerator.backward(loss)
             optimizer.step()
             if (iteration % 100) == 0:
                 with torch.no_grad():
@@ -75,7 +82,7 @@ def train(
 
             pbar.postfix = f": Loss: {loss.item():.4f}"
             pbar.update()
-
+        scheduler.step()
     torch.save(model.state_dict(), save_path / "model.pt")
     print(f"mean iteration time: {torch.tensor(iteration_times).mean():.4f}")
 

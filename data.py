@@ -10,24 +10,20 @@ from torch.utils.data import DataLoader, Dataset
 import utils
 
 
-class CollateFn:
-    def __init__(self, device):
-        self.device = device
+def CollateFn(samples):
+    batch_size=len(samples)
+    strokes, texts = zip(*samples)
 
+    all_strokes = pad_sequence([torch.tensor(s) for s in strokes])
+    all_texts = pad_sequence([torch.tensor(t) for t in texts])
+    strokes_mask = torch.ones((all_strokes.shape[0], batch_size), dtype=torch.bool)
+    texts_mask = torch.ones((all_texts.shape[0], batch_size), dtype=torch.bool)
+    for i in range(batch_size):
+        texts_mask[len(texts[i]):,i] = 0
+        strokes_mask[len(strokes[i]):,i] = 0
 
-    def __call__(self, samples):
-        batch_size=len(samples)
-        strokes, texts = zip(*samples)
+    return all_texts, texts_mask, all_strokes, strokes_mask
 
-        all_strokes = pad_sequence([torch.tensor(s, device=self.device) for s in strokes])
-        all_texts = pad_sequence([torch.tensor(t, device=self.device) for t in texts])
-        strokes_mask = torch.ones((all_strokes.shape[0], batch_size), dtype=torch.bool, device=self.device)
-        texts_mask = torch.ones((all_texts.shape[0], batch_size), dtype=torch.bool, device=self.device)
-        for i in range(batch_size):
-            texts_mask[len(texts[i]):,i] = 0
-            strokes_mask[len(strokes[i]):,i] = 0
-
-        return all_texts, texts_mask, all_strokes, strokes_mask
 
 
 class HandwritingDataset(Dataset):
@@ -77,8 +73,7 @@ class HandwritingDataset(Dataset):
 def main(show_regular=True, show_inf_dl=False, data_device: str = "cpu"):
     if show_regular:
         dataset = HandwritingDataset()
-        collate_fn = CollateFn(data_device)
-        dl = DataLoader(dataset, shuffle=True, batch_size=4, collate_fn=collate_fn)
+        dl = DataLoader(dataset, shuffle=True, batch_size=4, collate_fn=CollateFn)
         texts, texts_mask, strokes, strokes_mask = next(iter(dl))
         print(f"texts.shape: {texts.shape}")
         print(f"texts_mask.shape: {texts_mask.shape}")
