@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributions.bernoulli import Bernoulli
+from torch.distributions.categorical import Categorical
 from torch.utils.data import DataLoader
 
 import data
@@ -74,18 +75,22 @@ class MixtureLayer(nn.Module):
         log_weights = F.log_softmax(log_weights, dim=-1)
 
         # Hardcode rho to 0 until I figure out how to sample correctly
-        rho = torch.zeros(means.shape[:-1], device=means.device)
-        #rho = torch.tanh(rho) * (1 - self.epsilon)
+        #rho = torch.zeros(means.shape[:-1], device=means.device)
+        rho = torch.tanh(rho) * (1 - self.epsilon)
         return penup_logits, log_weights, means, log_std, rho
 
     def get_sample(self, x, bias=10):
         penup_logits, log_weights, means, log_std, rho = self.get_distribution_parameters(x)
 
-        weights = torch.softmax(torch.exp(log_weights*(1+bias)), dim=-1).squeeze(dim=0)
-        which_mixture = torch.multinomial(weights, 1).squeeze(0)
-        log_std = log_std[:, :, which_mixture, :]
-        means = means[:, :, which_mixture, :]
-        rho = rho[:, :, which_mixture]
+        which_mixture = Categorical(logits=log_weights).sample()
+        batch_size = log_weights.shape[0]
+        num_dimensions = log_weights.dim()
+        log_std = log_std.view(-1, self.num_mixtures, 2)
+        means = means.view(-1, self.num_mixtures, 2)
+        rho = rho.view(-1, self.num_mixtures)
+        log_std = log_std[torch.arange(log_std.shape[0]), which_mixture]
+        means = means[torch.arange(log_std.shape[0]), which_mixture]
+        rho = rho[torch.arange(log_std.shape[0]), which_mixture]
 
         stds = torch.exp(log_std - bias)
 
@@ -95,8 +100,13 @@ class MixtureLayer(nn.Module):
 
         rand1 = torch.randn_like(mu1)
         rand2 = torch.randn_like(mu2)
+        rand3 = rand1 * rho + torch.sqrt(1 - rho ** 2) * rand2
+        # rand1 and rand3 have correlation rho and std dev 1
         coord1 = rand1 * std1 + mu1
-        coord2 = rand2 * std2 + mu2
+        coord2 = rand3 * std2 + mu2
+        if num_dimensions > 2:
+            coord1 = coord1.reshape(batch_size, -1, 1)
+            coord2 = coord2.reshape(batch_size, -1, 1)
         penup = Bernoulli(logits=penup_logits).sample()
         sample = torch.cat((penup, coord1, coord2), dim=-1)
         return sample
@@ -118,8 +128,9 @@ class MixtureLayer(nn.Module):
 
         frac1 = (x - mu1)/std1
         frac2 = (y - mu2)/std2
-        Z = frac1**2 + frac2**2- 2*rho*frac1*frac2
-        logN = -Z/2*(1-rho**2) - torch.log(torch.tensor([2*torch.pi], device=x.device)) - logstd1 - logstd2 -0.5 * torch.log(1-rho**2)
+        Z = frac1**2 + frac2**2 - 2*rho*frac1*frac2
+        logN = -Z/(2*(1-rho**2)) - torch.log(torch.tensor([2*torch.pi], device=x.device))
+        logN += -logstd1 - logstd2 -0.5 * torch.log(1-rho**2)
 
         log_coords_loss = -torch.logsumexp(logN + log_weights, dim=-1)
         log_coords_loss = log_coords_loss.masked_select(target_mask).mean()
@@ -130,8 +141,7 @@ class MixtureLayer(nn.Module):
 
 class Scribe(nn.Module):
     @argbind.bind(without_prefix=True)
-    # TODO(neil): Update num_embeddings from data
-    def __init__(self, dataset, input_size=3, hidden_size=20):
+    def __init__(self, dataset, input_size=3, hidden_size=20, num_mixtures=10):
         super(Scribe, self).__init__()
         self.embedding_dim = 10
         self.dataset = dataset
@@ -141,7 +151,7 @@ class Scribe(nn.Module):
         self.rnn2 = nn.GRU(input_size=hidden_size+self.embedding_dim, hidden_size=hidden_size)
         self.attention = GaussianAttention(query_size=hidden_size)
         self.softmax = nn.Softmax(dim=2)
-        self.mixture_layer = MixtureLayer(hidden_size)
+        self.mixture_layer = MixtureLayer(hidden_size, num_mixtures=num_mixtures)
 
     def get_scribe_loss(self, prediction, target, target_mask=None):
         return self.mixture_layer.get_scribe_loss(prediction, target, target_mask)
@@ -183,6 +193,9 @@ class Scribe(nn.Module):
         for _ in range(num_steps):
             x, hidden = self.step(sample, embedded_prompt, prompt_mask, hidden)
 
+            _, position, _ = hidden
+            if position > len(promptStr):
+                break
             sample = self.mixture_layer.get_sample(x, bias)
             output.append(sample)
         return torch.vstack(output)
