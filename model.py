@@ -1,8 +1,11 @@
-from argparse import ArgumentParser
+import math
 
 import argbind
 import torch
+import torch.nn.functional as F
 from torch import nn
+from torch.distributions.bernoulli import Bernoulli
+from torch.distributions.categorical import Categorical
 from torch.utils.data import DataLoader
 
 import data
@@ -43,10 +46,102 @@ class GaussianAttention(nn.Module):
 
         return new_context, mean
 
+class MixtureLayer(nn.Module):
+    def __init__(self, num_inputs, num_mixtures=3, epsilon=1e-6):
+        super(MixtureLayer, self).__init__()
+        self.num_mixtures = num_mixtures
+        out_features = 1 + (# penup
+                     num_mixtures * (1 + # mixture weights
+                         2 + # x/y
+                         2 + # stddevs
+                         1))   # rho (correlation)
+        self.linear = nn.Linear(in_features=num_inputs, out_features=out_features)
+        self.bce_loss = torch.nn.BCEWithLogitsLoss(reduction='none')
+        self.epsilon = epsilon
+
+    def forward(self, x):
+        # [:, :, 0:1] param is penup logit
+        # [:, :, 1:1+num_mixtures] are mixture weights
+        # [:, :, 1+1*num_mixtures:1 + 3*num_mixtures] are x/y coords
+        # [:, :, 1+3*num_mixtures:1 + 4*num_mixtures] are stddevs
+        #
+        return self.linear(x)
+
+    def get_distribution_parameters(self, x):
+        penup_logits, log_weights, means, log_std, rho =  x.split([1, self.num_mixtures, 2*self.num_mixtures, 2*self.num_mixtures, 1*self.num_mixtures], dim=-1)
+
+        means = means.view(means.shape[:-1] + (self.num_mixtures, 2))
+        log_std = log_std.view(log_std.shape[:-1] + (self.num_mixtures, 2))
+        log_weights = F.log_softmax(log_weights, dim=-1)
+
+        # Hardcode rho to 0 until I figure out how to sample correctly
+        #rho = torch.zeros(means.shape[:-1], device=means.device)
+        rho = torch.tanh(rho) * (1 - self.epsilon)
+        return penup_logits, log_weights, means, log_std, rho
+
+    def get_sample(self, x, bias=10):
+        penup_logits, log_weights, means, log_std, rho = self.get_distribution_parameters(x)
+
+        which_mixture = Categorical(logits=log_weights).sample()
+        batch_size = log_weights.shape[0]
+        num_dimensions = log_weights.dim()
+        log_std = log_std.view(-1, self.num_mixtures, 2)
+        means = means.view(-1, self.num_mixtures, 2)
+        rho = rho.view(-1, self.num_mixtures)
+        log_std = log_std[torch.arange(log_std.shape[0]), which_mixture]
+        means = means[torch.arange(log_std.shape[0]), which_mixture]
+        rho = rho[torch.arange(log_std.shape[0]), which_mixture]
+
+        stds = torch.exp(log_std - bias)
+
+        # sample
+        mu1, mu2 = means.unbind(-1)
+        std1, std2 = stds.unbind(-1)
+
+        rand1 = torch.randn_like(mu1)
+        rand2 = torch.randn_like(mu2)
+        rand3 = rand1 * rho + torch.sqrt(1 - rho ** 2) * rand2
+        # rand1 and rand3 have correlation rho and std dev 1
+        coord1 = rand1 * std1 + mu1
+        coord2 = rand3 * std2 + mu2
+        if num_dimensions > 2:
+            coord1 = coord1.reshape(batch_size, -1, 1)
+            coord2 = coord2.reshape(batch_size, -1, 1)
+        penup = Bernoulli(logits=penup_logits).sample()
+        sample = torch.cat((penup, coord1, coord2), dim=-1)
+        return sample
+
+    def get_scribe_loss(self, prediction, target, target_mask=None):
+        penup_logits, log_weights, means, log_std, rho = self.get_distribution_parameters(prediction)
+        target_penup, x, y = target.unbind(-1)
+        #print(f"{target_penup=}")
+        penup_loss = F.binary_cross_entropy_with_logits(penup_logits.squeeze(-1), target_penup)
+        penup_loss = penup_loss.masked_select(target_mask).mean()
+
+        mu1, mu2 = means.unbind(-1)
+        logstd1, logstd2 = log_std.unbind(-1)
+        std1 = torch.exp(logstd1) + self.epsilon
+        std2 = torch.exp(logstd2) + self.epsilon
+
+        x = x.unsqueeze(-1)
+        y = y.unsqueeze(-1)
+
+        frac1 = (x - mu1)/std1
+        frac2 = (y - mu2)/std2
+        Z = frac1**2 + frac2**2 - 2*rho*frac1*frac2
+        logN = -Z/(2*(1-rho**2)) - torch.log(torch.tensor([2*torch.pi], device=x.device))
+        logN += -logstd1 - logstd2 -0.5 * torch.log(1-rho**2)
+
+        log_coords_loss = -torch.logsumexp(logN + log_weights, dim=-1)
+        log_coords_loss = log_coords_loss.masked_select(target_mask).mean()
+
+        loss =  penup_loss + log_coords_loss
+        return loss
+
+
 class Scribe(nn.Module):
     @argbind.bind(without_prefix=True)
-    # TODO(neil): Update num_embeddings from data
-    def __init__(self, dataset, input_size=3, hidden_size=20, output_size=3):
+    def __init__(self, dataset, input_size=3, hidden_size=20, num_mixtures=10):
         super(Scribe, self).__init__()
         self.embedding_dim = 10
         self.dataset = dataset
@@ -54,9 +149,12 @@ class Scribe(nn.Module):
         self.hidden_size = hidden_size
         self.rnn1 = nn.GRU(input_size=input_size, hidden_size=hidden_size)
         self.rnn2 = nn.GRU(input_size=hidden_size+self.embedding_dim, hidden_size=hidden_size)
-        self.linear = nn.Linear(in_features=hidden_size, out_features=output_size)
         self.attention = GaussianAttention(query_size=hidden_size)
+        self.softmax = nn.Softmax(dim=2)
+        self.mixture_layer = MixtureLayer(hidden_size, num_mixtures=num_mixtures)
 
+    def get_scribe_loss(self, prediction, target, target_mask=None):
+        return self.mixture_layer.get_scribe_loss(prediction, target, target_mask)
 
     def forward(self, strokes, texts, textsmask):
         hidden = None
@@ -74,7 +172,7 @@ class Scribe(nn.Module):
         o1, hidden1 = self.rnn1(x, hidden1)
         context, previous_position = self.attention(o1, embedded_text, textsmask, previous_position)
         o2, hidden2 = self.rnn2(torch.cat((o1, context), dim=-1), hidden2)
-        output = self.linear(o2)
+        output = self.mixture_layer(o2)
 
         result = output, (hidden1, previous_position, hidden2)
         return result
@@ -85,10 +183,6 @@ class Scribe(nn.Module):
 
     @argbind.bind
     def sample(self, promptStr, num_steps=120, bias=0.0, stddev=0.1):
-        def sample_from_distribution(mean, std_logits):
-            std = torch.exp(std_logits - bias)
-            return torch.normal(mean=mean, std=std)
-
         batch_size = 1
         embedded_prompt = self.embedding(torch.tensor(self.dataset.text2code(promptStr), device=self.device).unsqueeze(dim=1))
         prompt_mask = torch.ones((len(promptStr), 1), device=self.device)
@@ -99,10 +193,10 @@ class Scribe(nn.Module):
         for _ in range(num_steps):
             x, hidden = self.step(sample, embedded_prompt, prompt_mask, hidden)
 
-            mean = x[:, :, 1:3]
-            coords = sample_from_distribution(mean, stddev)
-            penup = torch.sigmoid(x[:, :, 0:1]) > torch.rand((1, batch_size, 1)).to(self.device)
-            sample = torch.cat((penup, coords), dim=2)
+            _, position, _ = hidden
+            if position > len(promptStr):
+                break
+            sample = self.mixture_layer.get_sample(x, bias)
             output.append(sample)
         return torch.vstack(output)
 
